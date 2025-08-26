@@ -1,0 +1,8 @@
+﻿fastapi
+uvicorn
+sqlalchemy
+sendgrid
+python-jose
+passlib[bcrypt]
+python-multipart
+pydantic
