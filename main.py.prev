@@ -96,13 +96,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Create incident request endpoint
-@app.post('/incident_request', summary="Create a new incident report request", description="Submit a request for an incident report by providing the incident address, date/time, and county.")
-def create_incident_request(req: IncidentRequestCreate = Body(...), token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    # Ensure all fields are strings and provided
-    if not req.incident_address or not req.incident_datetime or not req.county:
-        raise HTTPException(status_code=422, detail="All fields must be provided and non-empty")
-
+# Create incident request endpoint (request body version)
+@app.post(
+    '/incident_request',
+    summary="Create a new incident report request",
+    description="Submit a request for an incident report by providing the incident address, date/time, and county."
+)
+def create_incident_request(
+    req: IncidentRequestCreate = Body(..., example={
+        "incident_address": "123 Main St",
+        "incident_datetime": "2025-08-26 14:00",
+        "county": "Los Angeles"
+    }),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
     email = COUNTY_EMAIL_MAP.get(req.county)
     if not email:
         raise HTTPException(status_code=400, detail="No email found for this county")
