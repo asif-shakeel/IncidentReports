@@ -23,7 +23,8 @@ FROM_EMAIL = "request@incidentreporthub.com"
 
 # Postgres DB setup
 # Use the DATABASE_URL provided by Render Postgres
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://incidentreports_postgres_user:EuRv9ILeWK8uC8M6syt0W90o5ujpgV9x@dpg-d2n6uqp5pdvs73ckeabg-a/incidentreports_postgres")
+# DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://incidentreports_postgres_user:EuRv9ILeWK8uC8M6syt0W90o5ujpgV9x@dpg-d2n6uqp5pdvs73ckeabg-a/incidentreports_postgres")  # Old SQLite comment can be ignored
+DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

@@ -1,13 +1,12 @@
-# models.py
 from sqlalchemy import Column, Integer, String
-from database import Base
+from main import Base  # import the Base from main.py
 
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
-    email = Column(String, unique=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    email = Column(String, nullable=False)
 
 class IncidentRequest(Base):
     __tablename__ = 'incident_requests'
