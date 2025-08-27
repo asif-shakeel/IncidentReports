@@ -7,8 +7,8 @@ load_dotenv()
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 message = Mail(
-    from_email="request@incidentreporthub.com",
-    to_emails="your_email@example.com",
+    from_email="request@incidentreportshub.com",
+    to_emails="asif.shakeel@gmail.com",
     subject="Test Email",
     plain_text_content="Hello from SendGrid!"
 )
