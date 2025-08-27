@@ -1,6 +1,6 @@
 # IncidentReportHub Backend Phase 1 - Postgres with Alembic Ready Setup
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Body
+from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, Column, Integer, String
@@ -96,16 +96,17 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Create incident request endpoint
-@app.post('/incident_request', summary="Create a new incident report request", description="Submit a request for an incident report by providing the incident address, date/time, and county.")
-def create_incident_request(req: IncidentRequestCreate = Body(...), token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    # Ensure all fields are strings and provided
-    if not req.incident_address or not req.incident_datetime or not req.county:
-        raise HTTPException(status_code=422, detail="All fields must be provided and non-empty")
-
+# Create incident request endpoint with proper Pydantic body validation
+@app.post(
+    '/incident_request',
+    summary="Create a new incident report request",
+    description="Submit a request for an incident report by providing the incident address, date/time, and county.",
+    status_code=status.HTTP_201_CREATED
+)
+def create_incident_request(req: IncidentRequestCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     email = COUNTY_EMAIL_MAP.get(req.county)
     if not email:
-        raise HTTPException(status_code=400, detail="No email found for this county")
+        raise HTTPException(status_code=400, detail=f"No email found for county '{req.county}'")
 
     new_request = IncidentRequest(
         user_token=token,
