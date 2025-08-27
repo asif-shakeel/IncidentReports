@@ -1,4 +1,4 @@
-﻿fastapi
+fastapi
 uvicorn
 sqlalchemy
 sendgrid
@@ -6,3 +6,4 @@ python-jose
 passlib[bcrypt]
 python-multipart
 pydantic
+psycopg2-binary
