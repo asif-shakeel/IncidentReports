@@ -67,7 +67,7 @@ def create_incident_request(incident_address: str, incident_datetime: str, count
 
 
 
-app = FastAPI()
+
 
 @app.post('/inbound')
 async def inbound_parse(request: Request):
