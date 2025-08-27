@@ -5,17 +5,20 @@ from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import csv
 import os
+import re
+import json
 from auth import get_password_hash, verify_password, create_access_token
 from dotenv import load_dotenv
 
-# Optional: import for LLM parsing
-from openai import OpenAI
-import json
+# Optional: OpenAI client (LLM fallback)
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 # Load environment variables
 load_dotenv()
 
-# Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable not set")
@@ -24,7 +27,6 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Models
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, index=True)
@@ -51,7 +53,6 @@ class InboundEmail(Base):
     parsed_datetime = Column(String, nullable=True)
     parsed_county = Column(String, nullable=True)
 
-# Load county-email mapping from CSV
 COUNTY_EMAIL_MAP = {}
 with open('ca_all_counties_fire_records_contacts_template.csv') as f:
     reader = csv.DictReader(f)
@@ -61,14 +62,12 @@ with open('ca_all_counties_fire_records_contacts_template.csv') as f:
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 FROM_EMAIL = "request@incidentreportshub.com"
 
-# Optional: OpenAI client for LLM parsing
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAI) else None
 
-# FastAPI app
 app = FastAPI(title="IncidentReportHub Backend Phase 1 - Postgres")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
-# Pydantic models
 class RegisterRequest(BaseModel):
     username: str
     password: str
@@ -79,7 +78,8 @@ class IncidentRequestCreate(BaseModel):
     incident_datetime: str
     county: str
 
-# Dependency
+# Helpers
+
 def get_db():
     db = SessionLocal()
     try:
@@ -87,7 +87,14 @@ def get_db():
     finally:
         db.close()
 
-# Endpoints
+def normalize(s: str) -> str:
+    """Lowercase, strip punctuation except spaces/digits/letters, collapse whitespace."""
+    if not s:
+        return ''
+    s = re.sub(r'[^0-9a-zA-Z ]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip().lower()
+
 @app.post('/register')
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
@@ -125,7 +132,6 @@ def create_incident_request(req: IncidentRequestCreate, token: str = Depends(oau
     db.commit()
     db.refresh(new_request)
 
-    # Send email via SendGrid
     if SENDGRID_API_KEY:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
@@ -143,7 +149,6 @@ def create_incident_request(req: IncidentRequestCreate, token: str = Depends(oau
 
     return {"msg": "Incident request created and email sent", "request_id": new_request.id}
 
-# Inbound parsing with LLM fallback
 @app.post('/inbound')
 async def inbound_parse(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
@@ -154,30 +159,38 @@ async def inbound_parse(request: Request, db: Session = Depends(get_db)):
     if not sender or not body:
         raise HTTPException(status_code=400, detail="Invalid inbound email payload")
 
-    # Try simple parsing first
+    # 1) Simple rule-based parse first
     parsed_address = parsed_datetime = parsed_county = None
-    for line in body.splitlines():
-        line = line.strip()
-        if line.lower().startswith('address:'):
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        lower = line.lower()
+        if lower.startswith('address:'):
             parsed_address = line[len('Address:'):].strip()
-        elif line.lower().startswith('date/time:'):
+        elif lower.startswith('date/time:'):
             parsed_datetime = line[len('Date/Time:'):].strip()
-        elif line.lower().startswith('county:'):
+        elif lower.startswith('county:'):
             parsed_county = line[len('County:'):].strip()
 
-    # If parsing failed, use LLM
-    if not (parsed_address and parsed_datetime and parsed_county):
-        prompt = f"Extract the address, datetime, and county from this email text and return as JSON:\n{body}\n\nFormat: {json.dumps({'address':'','datetime':'','county':''})}"
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
+    # 2) LLM fallback if any field missing
+    if openai_client and not (parsed_address and parsed_datetime and parsed_county):
+        prompt = (
+            "Extract the address, datetime, and county from this email text and return JSON with keys 'address', 'datetime', 'county'.\n"
+            f"EMAIL:\n{body}\n\n"
+            "Return ONLY the JSON object."
         )
         try:
-            llm_parsed = json.loads(response.choices[0].message.content)
-            parsed_address = parsed_address or llm_parsed.get('address')
-            parsed_datetime = parsed_datetime or llm_parsed.get('datetime')
-            parsed_county = parsed_county or llm_parsed.get('county')
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                timeout=12,
+            )
+            content = resp.choices[0].message.content.strip()
+            llm = json.loads(content)
+            parsed_address = parsed_address or llm.get('address')
+            parsed_datetime = parsed_datetime or llm.get('datetime')
+            parsed_county = parsed_county or llm.get('county')
         except Exception:
+            # swallow errors (rate limit / quota / bad JSON) and continue with whatever we have
             pass
 
     inbound_record = InboundEmail(
@@ -191,15 +204,19 @@ async def inbound_parse(request: Request, db: Session = Depends(get_db)):
     db.add(inbound_record)
     db.commit()
 
+    # 3) Robust matching: normalize and compare in Python after a coarse DB filter
     match_info = None
     if parsed_address and parsed_datetime and parsed_county:
-        match = db.query(IncidentRequest).filter(
-            IncidentRequest.incident_address.ilike(f"%{parsed_address}%"),
-            IncidentRequest.incident_datetime.ilike(f"%{parsed_datetime}%"),
-            IncidentRequest.county.ilike(f"%{parsed_county}%")
-        ).first()
-        if match:
-            match_info = {"incident_request_id": match.id}
+        p_addr = normalize(parsed_address)
+        p_dt = normalize(parsed_datetime)
+        p_cnty = normalize(parsed_county)
+
+        # coarse filter by county to avoid full scan
+        candidates = db.query(IncidentRequest).filter(IncidentRequest.county.ilike(f"%{parsed_county}%")).all()
+        for cand in candidates:
+            if normalize(cand.incident_address) == p_addr and normalize(cand.incident_datetime) == p_dt:
+                match_info = {"incident_request_id": cand.id}
+                break
 
     return {
         "status": "received",
