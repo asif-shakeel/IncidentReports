@@ -1,4 +1,5 @@
-# main.py
+# IncidentReportHub Backend Phase 1 - Postgres Version
+
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import create_engine
@@ -42,18 +43,23 @@ def get_db():
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
-# User registration endpoint
+# User registration endpoint with try/except for debugging
 @app.post('/register')
 def register(username: str, password: str, email: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if user:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    hashed_password = get_password_hash(password)
-    new_user = User(username=username, hashed_password=hashed_password, email=email)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return {"msg": "User registered successfully"}
+    try:
+        user = db.query(User).filter(User.username == username).first()
+        if user:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        hashed_password = get_password_hash(password)
+        new_user = User(username=username, hashed_password=hashed_password, email=email)
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        return {"msg": "User registered successfully"}
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating user: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 # Token endpoint
 @app.post('/token')
@@ -64,16 +70,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Create incident request and send email
+# Create incident request and send email with try/except
 @app.post('/incident_request')
 def create_incident_request(incident_address: str, incident_datetime: str, county: str, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     email = COUNTY_EMAIL_MAP.get(county, None)
     if not email:
         raise HTTPException(status_code=400, detail="No email found for this county")
-    new_request = IncidentRequest(user_token=token, incident_address=incident_address, incident_datetime=incident_datetime, county=county, county_email=email)
-    db.add(new_request)
-    db.commit()
-    db.refresh(new_request)
+    try:
+        new_request = IncidentRequest(user_token=token, incident_address=incident_address, incident_datetime=incident_datetime, county=county, county_email=email)
+        db.add(new_request)
+        db.commit()
+        db.refresh(new_request)
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating incident request: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     # Send email via SendGrid
     if SENDGRID_API_KEY:
@@ -99,3 +110,6 @@ async def inbound_parse(request: Request):
     return {"status": "received"}
 
 # OpenAPI/Docs URL for reference: https://incidentreports-1.onrender.com/docs
+
+# Note for deployment on Render:
+# Add psycopg2-binary to requirements.txt to ensure Postgres driver is installed.
