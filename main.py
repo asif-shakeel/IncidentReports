@@ -139,3 +139,5 @@ async def inbound_parse(request: Request):
     body = form.get('text')
     # TODO: parse incident address/date from body and store in DB
     return {"status": "received"}
+
+# Requirements note: ensure pydantic[email] is installed for EmailStr validation
