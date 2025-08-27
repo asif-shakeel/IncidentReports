@@ -34,8 +34,7 @@ class IncidentRequest(Base):
     county = Column(String)
     county_email = Column(String)
 
-# Create DB tables
-Base.metadata.create_all(bind=engine)
+# IMPORTANT: Removed Base.metadata.create_all(bind=engine). Alembic handles migrations.
 
 # Load county-email mapping from CSV
 COUNTY_EMAIL_MAP = {}
