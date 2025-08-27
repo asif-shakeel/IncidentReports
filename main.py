@@ -4,12 +4,13 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from pydantic import BaseModel
 import csv
 import os
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from auth import get_password_hash, verify_password, create_access_token
-from dotenv import load_dotenv  # Added for .env support
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -40,8 +41,6 @@ class IncidentRequest(Base):
     county = Column(String)
     county_email = Column(String)
 
-# IMPORTANT: Removed Base.metadata.create_all(bind=engine). Alembic handles migrations.
-
 # Load county-email mapping from CSV
 COUNTY_EMAIL_MAP = {}
 with open('ca_all_counties_fire_records_contacts_template.csv') as f:
@@ -50,7 +49,7 @@ with open('ca_all_counties_fire_records_contacts_template.csv') as f:
         COUNTY_EMAIL_MAP[row['County']] = row['Request Email']
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = "request@incidentreportshub.com"  # Fixed domain
+FROM_EMAIL = "request@incidentreportshub.com"  # Corrected domain
 
 # FastAPI app
 app = FastAPI(title="IncidentReportHub Backend Phase 1 - Postgres")
@@ -79,7 +78,6 @@ def register(username: str, password: str, email: str, db: Session = Depends(get
         return {"msg": "User registered successfully"}
     except Exception as e:
         db.rollback()
-        print(f"Error creating user: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 # Token endpoint
@@ -91,26 +89,41 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# Pydantic model for Incident Request
+class IncidentRequestCreate(BaseModel):
+    incident_address: str
+    incident_datetime: str
+    county: str
+
 # Create incident request endpoint
 @app.post('/incident_request')
-def create_incident_request(incident_address: str, incident_datetime: str, county: str, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    email = COUNTY_EMAIL_MAP.get(county, None)
+def create_incident_request(data: IncidentRequestCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    email = COUNTY_EMAIL_MAP.get(data.county)
     if not email:
         raise HTTPException(status_code=400, detail="No email found for this county")
     try:
-        new_request = IncidentRequest(user_token=token, incident_address=incident_address, incident_datetime=incident_datetime, county=county, county_email=email)
+        new_request = IncidentRequest(
+            user_token=token,
+            incident_address=data.incident_address,
+            incident_datetime=data.incident_datetime,
+            county=data.county,
+            county_email=email
+        )
         db.add(new_request)
         db.commit()
         db.refresh(new_request)
     except Exception as e:
         db.rollback()
-        print(f"Error creating incident request: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     # Send email via SendGrid
     if SENDGRID_API_KEY:
-        subject = f"Fire Incident Report Request: {incident_datetime}"
-        content = f"Please provide the incident report for the following details:\nAddress: {incident_address}\nDate/Time: {incident_datetime}"
+        subject = f"Fire Incident Report Request: {data.incident_datetime}"
+        content = (
+            f"Please provide the incident report for the following details:\n"
+            f"Address: {data.incident_address}\n"
+            f"Date/Time: {data.incident_datetime}"
+        )
         message = Mail(from_email=FROM_EMAIL, to_emails=email, subject=subject, plain_text_content=content)
         try:
             sg = SendGridAPIClient(SENDGRID_API_KEY)
