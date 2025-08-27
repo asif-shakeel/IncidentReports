@@ -7,6 +7,7 @@ from models import User, IncidentRequest
 from auth import get_password_hash, verify_password, create_access_token
 import csv
 import os
+from fastapi import FastAPI, Request
 
 # Load county-email mapping from CSV
 COUNTY_EMAIL_MAP = {}
@@ -64,3 +65,15 @@ def create_incident_request(incident_address: str, incident_datetime: str, count
     db.refresh(new_request)
     return {"msg": "Incident request created", "request_id": new_request.id}
 
+
+
+app = FastAPI()
+
+@app.post('/inbound')
+async def inbound_parse(request: Request):
+    form = await request.form()
+    sender = form.get('from')
+    subject = form.get('subject')
+    body = form.get('text')
+    # TODO: parse incident address/date and store in DB
+    return {"status": "received"}
