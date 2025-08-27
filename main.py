@@ -1,6 +1,6 @@
 # IncidentReportHub Backend Phase 1 - Postgres with Alembic Ready Setup
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, Column, Integer, String
@@ -75,7 +75,7 @@ def get_db():
         db.close()
 
 # User registration endpoint
-@app.post('/register')
+@app.post('/register', summary="Register a new user", description="Register a new user with username, password, and email.")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
     if user:
@@ -88,7 +88,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     return {"msg": "User registered successfully"}
 
 # Token endpoint
-@app.post('/token')
+@app.post('/token', summary="Obtain access token", description="Provide username and password to receive a JWT access token.")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
@@ -96,9 +96,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Create incident request endpoint
-@app.post('/incident_request')
-def create_incident_request(req: IncidentRequestCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+# Create incident request endpoint (request body version)
+@app.post(
+    '/incident_request',
+    summary="Create a new incident report request",
+    description="Submit a request for an incident report by providing the incident address, date/time, and county."
+)
+def create_incident_request(
+    req: IncidentRequestCreate = Body(..., example={
+        "incident_address": "123 Main St",
+        "incident_datetime": "2025-08-26 14:00",
+        "county": "Los Angeles"
+    }),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
     email = COUNTY_EMAIL_MAP.get(req.county)
     if not email:
         raise HTTPException(status_code=400, detail="No email found for this county")
@@ -131,7 +143,7 @@ def create_incident_request(req: IncidentRequestCreate, token: str = Depends(oau
     return {"msg": "Incident request created and email sent", "request_id": new_request.id}
 
 # Inbound parse endpoint
-@app.post('/inbound')
+@app.post('/inbound', summary="Receive inbound emails", description="Parse inbound emails for incident requests.")
 async def inbound_parse(request: Request):
     form = await request.form()
     sender = form.get('from')
