@@ -1,3 +1,5 @@
+# IncidentReportHub Backend Phase 1 - Postgres with Alembic Ready Setup
+
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import create_engine, Column, Integer, String
@@ -7,6 +9,10 @@ import os
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from auth import get_password_hash, verify_password, create_access_token
+from dotenv import load_dotenv  # Added for .env support
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -44,7 +50,7 @@ with open('ca_all_counties_fire_records_contacts_template.csv') as f:
         COUNTY_EMAIL_MAP[row['County']] = row['Request Email']
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = "request@incidentreporthub.com"
+FROM_EMAIL = "request@incidentreportshub.com"  # Fixed domain
 
 # FastAPI app
 app = FastAPI(title="IncidentReportHub Backend Phase 1 - Postgres")
