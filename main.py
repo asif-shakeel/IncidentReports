@@ -7,7 +7,7 @@ import csv
 import os
 import re
 import json
-from auth import get_password_hash, verify_password, create_access_token
+from auth import get_password_hash, verify_password, create_access_token, SECRET_KEY, ALGORITHM
 from dotenv import load_dotenv
 
 # Optional: OpenAI client (LLM fallback)
@@ -41,7 +41,7 @@ class IncidentRequest(Base):
     incident_address = Column(String)
     incident_datetime = Column(String)
     county = Column(String)
-    county_email = Column(String)
+    county_email = Column(String)  # destination office email
 
 class InboundEmail(Base):
     __tablename__ = 'inbound_emails'
@@ -61,6 +61,7 @@ with open('ca_all_counties_fire_records_contacts_template.csv') as f:
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 FROM_EMAIL = "request@incidentreportshub.com"
+ALERT_EMAIL = "alert@incidentreportshub.com"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAI) else None
@@ -171,7 +172,21 @@ async def inbound_parse(request: Request, db: Session = Depends(get_db)):
         elif lower.startswith('county:'):
             parsed_county = line[len('County:'):].strip()
 
-    # 2) LLM fallback if any field missing
+    # 2) Collect attachments (SendGrid inbound uses file parts; keys vary)
+    attachments = []
+    for key, value in form.multi_items():
+        if hasattr(value, 'filename') and value.filename:
+            try:
+                content = await value.read()
+                attachments.append({
+                    'filename': value.filename,
+                    'content': content,
+                    'content_type': getattr(value, 'content_type', 'application/octet-stream') or 'application/octet-stream'
+                })
+            except Exception:
+                continue
+
+    # 3) LLM fallback if any field missing
     if openai_client and not (parsed_address and parsed_datetime and parsed_county):
         prompt = (
             "Extract the address, datetime, and county from this email text and return JSON with keys 'address', 'datetime', 'county'.\n"
@@ -190,9 +205,10 @@ async def inbound_parse(request: Request, db: Session = Depends(get_db)):
             parsed_datetime = parsed_datetime or llm.get('datetime')
             parsed_county = parsed_county or llm.get('county')
         except Exception:
-            # swallow errors (rate limit / quota / bad JSON) and continue with whatever we have
+            # swallow errors and continue with whatever we have
             pass
 
+    # 4) Persist inbound record
     inbound_record = InboundEmail(
         sender=sender,
         subject=subject or '',
@@ -204,23 +220,102 @@ async def inbound_parse(request: Request, db: Session = Depends(get_db)):
     db.add(inbound_record)
     db.commit()
 
-    # 3) Robust matching: normalize and compare in Python after a coarse DB filter
+    # 5) Robust matching: normalize and compare in Python after a coarse DB filter
     match_info = None
+    matched_request = None
     if parsed_address and parsed_datetime and parsed_county:
         p_addr = normalize(parsed_address)
         p_dt = normalize(parsed_datetime)
-        p_cnty = normalize(parsed_county)
-
-        # coarse filter by county to avoid full scan
         candidates = db.query(IncidentRequest).filter(IncidentRequest.county.ilike(f"%{parsed_county}%")).all()
         for cand in candidates:
             if normalize(cand.incident_address) == p_addr and normalize(cand.incident_datetime) == p_dt:
+                matched_request = cand
                 match_info = {"incident_request_id": cand.id}
                 break
+
+    # 6) If matched, deliver attachments to the requesting user; else alert
+    if matched_request:
+        # Decode username from the JWT stored in user_token and find the user's email
+        try:
+            from jose import jwt
+            payload = jwt.decode(matched_request.user_token, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+        except Exception:
+            username = None
+        recipient_email = None
+        if username:
+            user = db.query(User).filter(User.username == username).first()
+            if user:
+                recipient_email = user.email
+
+        # If we have attachments and a recipient, email them out via SendGrid
+        if SENDGRID_API_KEY and attachments and recipient_email:
+            try:
+                from sendgrid import SendGridAPIClient
+                from sendgrid.helpers.mail import Mail, Attachment, Disposition
+                import base64
+
+                message = Mail(
+                    from_email=FROM_EMAIL,
+                    to_emails=recipient_email,
+                    subject=f"Your Incident Report(s) for {matched_request.incident_address}",
+                    plain_text_content=(
+                        f"We matched a response from the county office to your request.\n"
+                        f"Incident: {matched_request.incident_address} @ {matched_request.incident_datetime} ({matched_request.county})"
+                    ),
+                )
+                # Add all attachments
+                for att in attachments:
+                    encoded = base64.b64encode(att['content']).decode('utf-8')
+                    attach = Attachment()
+                    attach.file_content = encoded
+                    attach.file_type = att['content_type']
+                    attach.file_name = att['filename']
+                    attach.disposition = Disposition("attachment")
+                    # sendgrid's Mail supports a list via .add_attachment
+                    try:
+                        message.add_attachment(attach)
+                    except Exception:
+                        # older versions use .attachment single: fallback
+                        message.attachment = attach
+                sg = SendGridAPIClient(SENDGRID_API_KEY)
+                sg.send(message)
+            except Exception:
+                # best-effort; don't fail webhook
+                pass
+        elif SENDGRID_API_KEY and not attachments:
+            # No attachments from county -> alert
+            try:
+                from sendgrid import SendGridAPIClient
+                from sendgrid.helpers.mail import Mail
+                alert = Mail(
+                    from_email=FROM_EMAIL,
+                    to_emails=ALERT_EMAIL,
+                    subject=f"No attachments in county reply (request {matched_request.id})",
+                    plain_text_content=(
+                        f"Sender: {sender}\nSubject: {subject}\nBody:\n{body}"
+                    ),
+                )
+                sg = SendGridAPIClient(SENDGRID_API_KEY)
+                sg.send(alert)
+            except Exception:
+                pass
 
     return {
         "status": "received",
         "sender": sender,
         "parsed": {"address": parsed_address, "datetime": parsed_datetime, "county": parsed_county},
-        "match": match_info
+        "match": match_info,
+        "attachments": [a['filename'] for a in attachments] if attachments else []
     }
+
+# add temporarily to main.py
+@app.get("/admin/dbinfo")
+def dbinfo():
+    import sqlalchemy as sa
+    url = str(engine.url).replace(engine.url.password or "", "****")
+    with engine.connect() as conn:
+        users = conn.execute(sa.text("select count(*) from users")).scalar()
+        reqs  = conn.execute(sa.text("select count(*) from incident_requests")).scalar()
+        inbound = conn.execute(sa.text("select count(*) from inbound_emails")).scalar()
+    return {"database_url": url, "counts": {"users": users, "incident_requests": reqs, "inbound_emails": inbound}}
