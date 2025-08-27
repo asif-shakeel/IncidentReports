@@ -1,11 +1,9 @@
 fastapi
 uvicorn
 sqlalchemy
-sendgrid
-python-jose
-passlib[bcrypt]
-python-multipart
-pydantic
 psycopg2-binary
-bcrypt==3.2.2
-passlib[bcrypt]==1.7.4
+python-dotenv
+passlib[bcrypt]
+sendgrid
+python-jose[cryptography]
+alembic
