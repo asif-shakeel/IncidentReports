@@ -2,9 +2,9 @@
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
-from pydantic import BaseModel
 import csv
 import os
 from sendgrid import SendGridAPIClient
@@ -12,7 +12,7 @@ from sendgrid.helpers.mail import Mail
 from auth import get_password_hash, verify_password, create_access_token
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
 # Database setup
@@ -49,11 +49,22 @@ with open('ca_all_counties_fire_records_contacts_template.csv') as f:
         COUNTY_EMAIL_MAP[row['County']] = row['Request Email']
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = "request@incidentreportshub.com"  # Corrected domain
+FROM_EMAIL = "request@incidentreportshub.com"
 
 # FastAPI app
 app = FastAPI(title="IncidentReportHub Backend Phase 1 - Postgres")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+
+# Pydantic models for request bodies
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    email: EmailStr
+
+class IncidentRequestCreate(BaseModel):
+    incident_address: str
+    incident_datetime: str
+    county: str
 
 # Dependency to get DB session
 def get_db():
@@ -65,20 +76,16 @@ def get_db():
 
 # User registration endpoint
 @app.post('/register')
-def register(username: str, password: str, email: str, db: Session = Depends(get_db)):
-    try:
-        user = db.query(User).filter(User.username == username).first()
-        if user:
-            raise HTTPException(status_code=400, detail="Username already exists")
-        hashed_password = get_password_hash(password)
-        new_user = User(username=username, hashed_password=hashed_password, email=email)
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        return {"msg": "User registered successfully"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == req.username).first()
+    if user:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    hashed_password = get_password_hash(req.password)
+    new_user = User(username=req.username, hashed_password=hashed_password, email=req.email)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"msg": "User registered successfully"}
 
 # Token endpoint
 @app.post('/token')
@@ -89,40 +96,30 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Pydantic model for Incident Request
-class IncidentRequestCreate(BaseModel):
-    incident_address: str
-    incident_datetime: str
-    county: str
-
 # Create incident request endpoint
 @app.post('/incident_request')
-def create_incident_request(data: IncidentRequestCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    email = COUNTY_EMAIL_MAP.get(data.county)
+def create_incident_request(req: IncidentRequestCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    email = COUNTY_EMAIL_MAP.get(req.county)
     if not email:
         raise HTTPException(status_code=400, detail="No email found for this county")
-    try:
-        new_request = IncidentRequest(
-            user_token=token,
-            incident_address=data.incident_address,
-            incident_datetime=data.incident_datetime,
-            county=data.county,
-            county_email=email
-        )
-        db.add(new_request)
-        db.commit()
-        db.refresh(new_request)
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    new_request = IncidentRequest(
+        user_token=token,
+        incident_address=req.incident_address,
+        incident_datetime=req.incident_datetime,
+        county=req.county,
+        county_email=email
+    )
+    db.add(new_request)
+    db.commit()
+    db.refresh(new_request)
 
     # Send email via SendGrid
     if SENDGRID_API_KEY:
-        subject = f"Fire Incident Report Request: {data.incident_datetime}"
+        subject = f"Fire Incident Report Request: {req.incident_datetime}"
         content = (
             f"Please provide the incident report for the following details:\n"
-            f"Address: {data.incident_address}\n"
-            f"Date/Time: {data.incident_datetime}"
+            f"Address: {req.incident_address}\nDate/Time: {req.incident_datetime}"
         )
         message = Mail(from_email=FROM_EMAIL, to_emails=email, subject=subject, plain_text_content=content)
         try:
