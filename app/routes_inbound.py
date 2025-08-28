@@ -16,36 +16,40 @@ router = APIRouter()
 
 @router.post("/inbound")
 async def inbound(request: Request, db: Session = Depends(get_db)):
+    # 1) rate limit per client IP
     ip = request.client.host if request.client else "unknown"
     rate_limit_sender(f"inbound:{ip}")
 
+    # 2) read multipart form
     form = await request.form()
     sender = (form.get("from") or form.get("sender") or "").strip()
     subject = (form.get("subject") or "").strip()
     text = form.get("text") or ""
     html = form.get("html") or ""
 
+    # 3) collect attachments (any part with a filename)
     attachments = []
-    for key, value in form.multi_items():
+    for _, value in form.multi_items():
         if isinstance(value, UploadFile) and (value.filename or "").strip():
             content = await value.read()
             attachments.append((value.filename, content))
 
+    # 4) parse (your cleaner/LLM lives inside parse_inbound_email)
     address, dt_str, county = parse_inbound_email(text, html)
 
+    # 5) normalize for matching
     n_addr = normalize(address or "")
-    n_dt = normalize_datetime(dt_str or "")
+    n_dt   = normalize_datetime(dt_str or "")
     n_cnty = normalize(county or "")
 
+    # 6) persist inbound email with only columns that definitely exist
     inbound_id = None
     try:
+        # Save guaranteed fields; do NOT pass address/datetime/county since your model lacks them
         inbound_row = models.InboundEmail(
             sender=sender,
             subject=subject,
             body=(text or html or "")[:10000],
-            address=address or None,
-            datetime=dt_str or None,
-            county=county or None,
             has_attachments=bool(attachments),
         )
         db.add(inbound_row)
@@ -55,12 +59,22 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.warning(f"[inbound] persist failed: {e}")
 
+    # 7) find a matching IncidentRequest (county filter + exact normalized address & datetime)
     matched_request = None
     try:
         q = db.query(models.IncidentRequest)
         if n_cnty:
+            # county column name is 'county' in your request model, so this is safe
             q = q.filter(models.IncidentRequest.county.ilike(f"%{county}%"))
-        candidates = q.order_by(models.IncidentRequest.created_at.desc()).limit(200).all()
+
+        # Order by created_at if it exists; else fall back to id
+        order_col = getattr(models.IncidentRequest, "created_at", None)
+        if order_col is not None:
+            q = q.order_by(order_col.desc())
+        else:
+            q = q.order_by(models.IncidentRequest.id.desc())
+
+        candidates = q.limit(200).all()
         for r in candidates:
             if normalize(r.incident_address) == n_addr and normalize_datetime(r.incident_datetime) == n_dt:
                 matched_request = r
@@ -68,6 +82,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.warning(f"[inbound] match lookup failed: {e}")
 
+    # 8) resolve recipient from stored JWT and forward
     forwarded = False
     if matched_request and getattr(matched_request, "user_token", None):
         try:
@@ -77,7 +92,8 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
                 user = db.query(models.User).filter(models.User.username == username).first()
                 if user and user.email:
                     logger.info(
-                        f"[forward] to={user.email} files={len(attachments)} req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
+                        f"[forward] to={user.email} files={len(attachments)} "
+                        f"req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
                     )
                     subj_out = f"Incident Report: {subject or 'reply'}"
                     body_out = text or html or ""
