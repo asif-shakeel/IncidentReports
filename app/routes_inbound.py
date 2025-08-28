@@ -65,17 +65,16 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
 
 
     # 7) find a matching IncidentRequest (county filter + exact normalized address & datetime)
+    # 7) find a matching IncidentRequest
     matched_request = None
     try:
         q = db.query(models.IncidentRequest)
         if n_cnty:
-            # county column name is 'county' in your request model, so this is safe
             q = q.filter(models.IncidentRequest.county.ilike(f"%{county}%"))
 
-        # Order by created_at if it exists; else fall back to id
-        order_col = getattr(models.IncidentRequest, "created_at", None)
-        if order_col is not None:
-            q = q.order_by(order_col.desc())
+        # Prefer created_at if your IncidentRequest has it; else fall back to id
+        if hasattr(models.IncidentRequest, "created_at"):
+            q = q.order_by(models.IncidentRequest.created_at.desc())
         else:
             q = q.order_by(models.IncidentRequest.id.desc())
 
@@ -86,6 +85,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
                 break
     except Exception as e:
         logger.warning(f"[inbound] match lookup failed: {e}")
+
 
     # 8) resolve recipient from stored JWT and forward
     forwarded = False
