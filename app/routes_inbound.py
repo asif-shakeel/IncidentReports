@@ -45,19 +45,29 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     # 6) persist inbound email with only columns that definitely exist
     inbound_id = None
     try:
-        # Save guaranteed fields; do NOT pass address/datetime/county since your model lacks them
-        inbound_row = models.InboundEmail(
-            sender=sender,
-            subject=subject,
-            body=(text or html or "")[:10000],
-            has_attachments=bool(attachments),
-        )
+        # Discover available columns on the model at runtime
+        inbound_cols = {c.name for c in models.InboundEmail.__table__.columns}
+
+        # Candidate fields we’d like to store (only those present will be used)
+        candidate = {
+            "sender": sender,
+            "subject": subject,
+            "body": (text or html or "")[:10000],
+            "has_attachments": bool(attachments),  # will be dropped if column absent
+            "address": address or None,
+            "datetime": dt_str or None,
+            "county": county or None,
+        }
+
+        row_kwargs = {k: v for k, v in candidate.items() if k in inbound_cols}
+        inbound_row = models.InboundEmail(**row_kwargs)
         db.add(inbound_row)
         db.commit()
         db.refresh(inbound_row)
         inbound_id = inbound_row.id
     except Exception as e:
         logger.warning(f"[inbound] persist failed: {e}")
+
 
     # 7) find a matching IncidentRequest (county filter + exact normalized address & datetime)
     matched_request = None
