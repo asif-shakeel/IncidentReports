@@ -11,3 +11,5 @@ python-multipart
 python-jose
 email-validator
 openai
+python-dateutil
+alembic

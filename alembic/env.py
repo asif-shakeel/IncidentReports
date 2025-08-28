@@ -1,7 +1,16 @@
+# alembic/env.py (top of file)
+import os, sys
 from logging.config import fileConfig
-import os
-from sqlalchemy import engine_from_config, pool
 from alembic import context
+
+# Add project root to sys.path so 'app' is importable when running alembic anywhere
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+
+from sqlalchemy import engine_from_config, pool
+
 
 import sys
 import os
@@ -10,7 +19,10 @@ import os
 load_dotenv()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from main import Base
+# from main import Base
+from app.database import engine
+from app.models import Base
+
 # Alembic Config object
 config = context.config
 

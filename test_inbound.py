@@ -2,6 +2,15 @@
 import json
 import pytest
 from fastapi.testclient import TestClient
+import os
+from dotenv import load_dotenv
+
+# force tests to use the test env file
+load_dotenv(dotenv_path=".env.test", override=True)
+
+# hard stop if pointed at render/prod by mistake
+if "render.com" in (os.getenv("DATABASE_URL") or ""):
+    raise SystemExit("Refusing to run tests against a Render DB. Set a test DATABASE_URL.")
 
 # Import your app and models from the canvas code
 from main import (
