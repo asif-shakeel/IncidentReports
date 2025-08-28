@@ -44,8 +44,7 @@ from fastapi.responses import JSONResponse
 
 @app.get("/healthz", tags=["ops"])
 def healthz():
-    # import here to avoid any import-time surprises
-    from app.database import engine
+    from app.database import engine  # local import avoids import-time surprises
     status = {"ok": True, "db": False, "error": None}
     try:
         with engine.connect() as conn:
@@ -53,8 +52,8 @@ def healthz():
         status["db"] = True
     except Exception as e:
         status["error"] = str(e)
-    # Force explicit JSON; avoids any accidental None -> null
     return JSONResponse(status, headers={"Cache-Control": "no-store"})
+
 
 @app.get("/ping", tags=["ops"])
 def ping():
