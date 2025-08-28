@@ -13,8 +13,8 @@ if not DATABASE_URL:
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "request@incidentreportshub.com")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL", "alert@incidentreportshub.com")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "request@repo.incidentreportshub.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "alert@repo.incidentreportshub.com")
 INBOUND_RPS = int(os.getenv("INBOUND_RPS", "5"))
 WINDOW_SECS = int(os.getenv("INBOUND_WINDOW_SECS", "10"))
 
