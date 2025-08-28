@@ -1,7 +1,7 @@
 # ================================
 # FILE: app/models.py
 # ================================
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, func
 from app.database import Base
 
 class User(Base):
@@ -29,3 +29,10 @@ class InboundEmail(Base):
     parsed_address = Column(String, nullable=True)
     parsed_datetime = Column(String, nullable=True)
     parsed_county = Column(String, nullable=True)
+
+    # attachment tracking
+    has_attachments  = Column(Boolean, nullable=False, default=False)
+    attachment_count = Column(Integer, nullable=False, default=0)
+
+    # timestamps
+    created_at       = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
