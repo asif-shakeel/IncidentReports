@@ -27,6 +27,17 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     text = form.get("text") or ""
     html = form.get("html") or ""
 
+    # collect attachments (any part with a filename)
+    attachments = []
+    for _, value in form.multi_items():
+        if isinstance(value, UploadFile) and (value.filename or "").strip():
+            content = await value.read()
+            attachments.append((value.filename, content))
+
+    attachment_count = len(attachments)
+    has_attachments = attachment_count > 0
+    logger.info(f"[inbound] sender={sender} subject={subject!r} atts={attachment_count}")
+
     # 3) collect attachments (any part with a filename)
     attachments = []
     for _, value in form.multi_items():
@@ -43,8 +54,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     n_cnty = normalize(county or "")
 
 
-    # 6) persist inbound email with whatever columns actually exist on the model
-# 6) persist inbound email (direct columns)
+    # persist inbound email (direct columns)
     inbound_id = None
     try:
         inbound_row = models.InboundEmail(
@@ -54,7 +64,9 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
             parsed_address=address or None,
             parsed_datetime=dt_str or None,
             parsed_county=county or None,
-            # created_at is filled by DB DEFAULT now(), no need to set here
+            has_attachments=has_attachments,
+            attachment_count=attachment_count,
+            # created_at is filled by DB default now()
         )
         db.add(inbound_row)
         db.commit()
@@ -97,18 +109,19 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
                 user = db.query(models.User).filter(models.User.username == username).first()
                 if user and user.email:
                     logger.info(
-                        f"[forward] to={user.email} files={len(attachments)} "
+                        f"[forward] to={user.email} files={attachment_count} "
                         f"req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
                     )
                     subj_out = f"Incident Report: {subject or 'reply'}"
                     body_out = text or html or ""
-                    if attachments:
+                    if has_attachments:
                         ok = send_attachments_to_user(user.email, subj_out, body_out, attachments)
                     else:
                         ok = send_alert_no_attachments(user.email, subj_out, body_out)
                     forwarded = bool(ok)
         except Exception as e:
             logger.warning(f"[forward] failed: {e}")
+
 
     return {
         "status": "received",
