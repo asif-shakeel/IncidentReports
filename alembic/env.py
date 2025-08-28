@@ -16,7 +16,11 @@ import sys
 import os
 from dotenv import load_dotenv
 import os
-load_dotenv()
+from pathlib import Path
+
+root_env = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=root_env, override=True) 
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # from main import Base

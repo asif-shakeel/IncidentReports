@@ -10,8 +10,10 @@ from app.database import engine
 from app.routes_auth import router as auth_router
 from app.routes_inbound import router as inbound_router
 from app.routes_admin import router as admin_router
+from pathlib import Path
 
-load_dotenv()
+root_env = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=root_env, override=True) 
 
 show_docs = os.getenv("SHOW_DOCS", "1") == "1"
 app = FastAPI(

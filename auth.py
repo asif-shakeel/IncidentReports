@@ -5,7 +5,10 @@ from jose import JWTError, jwt
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+from pathlib import Path
+
+# root_env = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(override=True) 
 
 SECRET_KEY = os.getenv("SECRET_KEY", "fallback_secret_key")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")

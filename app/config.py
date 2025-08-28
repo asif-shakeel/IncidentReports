@@ -3,8 +3,10 @@
 # ================================
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+root_env = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=root_env, override=True) 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
