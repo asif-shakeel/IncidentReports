@@ -13,3 +13,6 @@ email-validator
 openai
 python-dateutil
 alembic
+beautifulsoup4
+requests
+jwt
