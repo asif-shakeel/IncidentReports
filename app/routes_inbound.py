@@ -44,40 +44,18 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
 
 
     # 6) persist inbound email with whatever columns actually exist on the model
+# 6) persist inbound email (direct columns)
     inbound_id = None
     try:
-        inbound_cols = {c.name for c in models.InboundEmail.__table__.columns}
-
-        # map parsed fields to whichever columns you actually have
-        field_map = {}
-        if "parsed_address" in inbound_cols:
-            field_map["parsed_address"] = address or None
-        elif "address" in inbound_cols:
-            field_map["address"] = address or None
-
-        if "parsed_datetime" in inbound_cols:
-            field_map["parsed_datetime"] = dt_str or None
-        elif "datetime" in inbound_cols:
-            field_map["datetime"] = dt_str or None
-
-        if "parsed_county" in inbound_cols:
-            field_map["parsed_county"] = county or None
-        elif "county" in inbound_cols:
-            field_map["county"] = county or None
-
-        # optional flags if present
-        if "has_attachments" in inbound_cols:
-            field_map["has_attachments"] = bool(attachments)
-
-        # always-safe basics
-        base_kwargs = {
-            "sender": sender,
-            "subject": subject,
-            "body": (text or html or "")[:10000],
-        }
-        row_kwargs = {k: v for k, v in {**base_kwargs, **field_map}.items() if k in inbound_cols}
-
-        inbound_row = models.InboundEmail(**row_kwargs)
+        inbound_row = models.InboundEmail(
+            sender=sender,
+            subject=subject,
+            body=(text or html or "")[:10000],
+            parsed_address=address or None,
+            parsed_datetime=dt_str or None,
+            parsed_county=county or None,
+            # created_at is filled by DB DEFAULT now(), no need to set here
+        )
         db.add(inbound_row)
         db.commit()
         db.refresh(inbound_row)
