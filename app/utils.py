@@ -1,39 +1,22 @@
 # ================================
 # FILE: app/utils.py
 # ================================
-import re
-import time
-from collections import deque, defaultdict
-from dateutil import parser as dtparser
-from fastapi import HTTPException
-from app.config import INBOUND_RPS, WINDOW_SECS
+import re, time
+from collections import defaultdict
 
-_sender_hits = defaultdict(deque)
+_sender_hits = defaultdict(list)
 
-def rate_limit_sender(sender: str):
+def normalize(text: str) -> str:
+    return text.strip().lower() if text else ""
+
+def normalize_datetime(dt_str: str) -> str:
+    return dt_str.strip() if dt_str else ""
+
+def rate_limit_sender(sender: str, rps: int, window: int) -> bool:
     now = time.time()
-    dq = _sender_hits[sender]
-    while dq and now - dq[0] > WINDOW_SECS:
-        dq.popleft()
-    if len(dq) >= INBOUND_RPS:
-        raise HTTPException(status_code=429, detail="Too many inbound emails from this sender; try again later.")
-    dq.append(now)
-
-_def_space = re.compile(r'\s+')
-_def_strip = re.compile(r'[^0-9a-zA-Z ]+')
-
-def normalize(s: str) -> str:
-    if not s:
-        return ''
-    s = _def_strip.sub(' ', s)
-    s = _def_space.sub(' ', s)
-    return s.strip().lower()
-
-def normalize_datetime(s: str) -> str:
-    if not s:
-        return ''
-    try:
-        dt = dtparser.parse(s)
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return normalize(s)
+    hits = _sender_hits[sender]
+    _sender_hits[sender] = [t for t in hits if now - t < window]
+    if len(_sender_hits[sender]) >= rps:
+        return False
+    _sender_hits[sender].append(now)
+    return True

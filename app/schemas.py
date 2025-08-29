@@ -1,12 +1,12 @@
 # ================================
 # FILE: app/schemas.py
 # ================================
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    email: EmailStr
+    email: str
 
 class IncidentRequestCreate(BaseModel):
     incident_address: str
