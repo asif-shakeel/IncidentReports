@@ -7,14 +7,27 @@ from app.database import get_db
 from app import models
 from app.email_parser import parse_inbound_email
 from app.email_io import send_attachments_to_user, send_alert_no_attachments
-from auth import SECRET_KEY, ALGORITHM
+
+# SECRET_KEY/ALGORITHM may live in app.config or root-level auth
+try:
+    from app.config import SECRET_KEY, ALGORITHM
+except ImportError:
+    from auth import SECRET_KEY, ALGORITHM
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Optional GET probe so browser/health checks don't 405
+@router.get("/inbound")
+def inbound_probe():
+    logger.info("[probe] GET /inbound called (health check)")
+    return {"ok": True, "hint": "SendGrid should POST multipart/form-data here."}
+
 @router.post("/inbound")
 async def inbound(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
+    logger.info(f"[inbound] received form keys: {list(form.keys())}")
+
     sender = (form.get("from") or form.get("sender") or "").strip()
     subject = (form.get("subject") or "").strip()
     text = form.get("text") or ""
@@ -113,6 +126,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
         "forwarded": forwarded,
         "inbound_id": inbound_id,
     }
+
 
 # from fastapi import APIRouter, Request, Depends, UploadFile
 # from sqlalchemy.orm import Session
