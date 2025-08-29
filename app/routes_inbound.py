@@ -1,26 +1,19 @@
-from fastapi import APIRouter, Request, Depends, UploadFile
-from sqlalchemy.orm import Session
 import logging
 import os
 import jwt
-
+from fastapi import APIRouter, Request, Depends, UploadFile
+from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models
-from app.utils import normalize, normalize_datetime, rate_limit_sender
-from auth import SECRET_KEY, ALGORITHM
-from app.email_io import send_attachments_to_user, send_alert_no_attachments
 from app.email_parser import parse_inbound_email
+from app.mailer import send_attachments_to_user, send_alert_no_attachments
+from app.config import SECRET_KEY, ALGORITHM
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/inbound")
 async def inbound(request: Request, db: Session = Depends(get_db)):
-    # 1) rate limit per client IP
-    ip = request.client.host if request.client else "unknown"
-    rate_limit_sender(f"inbound:{ip}")
-
-    # 2) read multipart form
     form = await request.form()
     sender = (form.get("from") or form.get("sender") or "").strip()
     subject = (form.get("subject") or "").strip()
@@ -31,13 +24,11 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     attachments = []
     nonfile_log = []
     for key, value in form.multi_items():
-        # UploadFile => actual binary attachment; str => normal field
-        if hasattr(value, "filename") and value.filename:
+        if isinstance(value, UploadFile) and (value.filename or "").strip():
             content = await value.read()
             attachments.append((value.filename, content))
             logger.info(f"[inbound] FILE part key={key!r} filename={value.filename!r} size={len(content)}")
         else:
-            # Keep a short sample of non-file fields to see what SendGrid actually sent
             val = str(value)
             nonfile_log.append((key, (val[:80] + "…") if len(val) > 80 else val))
 
@@ -48,34 +39,11 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     has_attachments = attachment_count > 0
     logger.info(f"[inbound] attachment_count={attachment_count}")
 
-    # collect attachments (any part with a filename)
-    attachments = []
-    for _, value in form.multi_items():
-        if isinstance(value, UploadFile) and (value.filename or "").strip():
-            content = await value.read()
-            attachments.append((value.filename, content))
-
-    attachment_count = len(attachments)
-    has_attachments = attachment_count > 0
-    logger.info(f"[inbound] sender={sender} subject={subject!r} atts={attachment_count}")
-
-    # 3) collect attachments (any part with a filename)
-    attachments = []
-    for _, value in form.multi_items():
-        if isinstance(value, UploadFile) and (value.filename or "").strip():
-            content = await value.read()
-            attachments.append((value.filename, content))
-
-    # 4) parse (your cleaner/LLM lives inside parse_inbound_email)
+    # --- Parse email body ---
     address, dt_str, county = parse_inbound_email(text, html)
+    logger.info(f"[inbound] parsed addr={address!r} dt={dt_str!r} county={county!r}")
 
-    # 5) normalize for matching
-    n_addr = normalize(address or "")
-    n_dt   = normalize_datetime(dt_str or "")
-    n_cnty = normalize(county or "")
-
-
-    # persist inbound email (direct columns)
+    # --- Persist inbound email ---
     inbound_id = None
     try:
         inbound_row = models.InboundEmail(
@@ -87,7 +55,6 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
             parsed_county=county or None,
             has_attachments=has_attachments,
             attachment_count=attachment_count,
-            # created_at is filled by DB default now()
         )
         db.add(inbound_row)
         db.commit()
@@ -96,31 +63,26 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.warning(f"[inbound] persist failed: {e}")
 
-
-    # 7) find a matching IncidentRequest (county filter + exact normalized address & datetime)
-    # 7) find a matching IncidentRequest
+    # --- Match against IncidentRequests ---
     matched_request = None
     try:
         q = db.query(models.IncidentRequest)
-        if n_cnty:
+        if county:
             q = q.filter(models.IncidentRequest.county.ilike(f"%{county}%"))
-
-        # Prefer created_at if your IncidentRequest has it; else fall back to id
         if hasattr(models.IncidentRequest, "created_at"):
             q = q.order_by(models.IncidentRequest.created_at.desc())
         else:
             q = q.order_by(models.IncidentRequest.id.desc())
-
         candidates = q.limit(200).all()
         for r in candidates:
-            if normalize(r.incident_address) == n_addr and normalize_datetime(r.incident_datetime) == n_dt:
+            if (r.incident_address or "").strip().lower() == (address or "").strip().lower() and \
+               (r.incident_datetime or "").strip() == (dt_str or "").strip():
                 matched_request = r
                 break
     except Exception as e:
         logger.warning(f"[inbound] match lookup failed: {e}")
 
-
-    # 8) resolve recipient from stored JWT and forward
+    # --- Forward if matched ---
     forwarded = False
     if matched_request and getattr(matched_request, "user_token", None):
         try:
@@ -130,8 +92,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
                 user = db.query(models.User).filter(models.User.username == username).first()
                 if user and user.email:
                     logger.info(
-                        f"[forward] to={user.email} files={attachment_count} "
-                        f"req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
+                        f"[forward] to={user.email} files={attachment_count} req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
                     )
                     subj_out = f"Incident Report: {subject or 'reply'}"
                     body_out = text or html or ""
@@ -143,16 +104,170 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
         except Exception as e:
             logger.warning(f"[forward] failed: {e}")
 
-
     return {
         "status": "received",
         "sender": sender,
         "parsed": {"address": address, "datetime": dt_str, "county": county},
         "match": getattr(matched_request, "id", None),
-        "attachments": [name for name, _ in attachments],
+        "attachments": [fn for fn, _ in attachments],
         "forwarded": forwarded,
         "inbound_id": inbound_id,
     }
+# from fastapi import APIRouter, Request, Depends, UploadFile
+# from sqlalchemy.orm import Session
+# import logging
+# import os
+# import jwt
+
+# from app.database import get_db
+# from app import models
+# from app.utils import normalize, normalize_datetime, rate_limit_sender
+# from auth import SECRET_KEY, ALGORITHM
+# from app.email_io import send_attachments_to_user, send_alert_no_attachments
+# from app.email_parser import parse_inbound_email
+
+# logger = logging.getLogger(__name__)
+# router = APIRouter()
+
+# @router.post("/inbound")
+# async def inbound(request: Request, db: Session = Depends(get_db)):
+#     # 1) rate limit per client IP
+#     ip = request.client.host if request.client else "unknown"
+#     rate_limit_sender(f"inbound:{ip}")
+
+#     # 2) read multipart form
+#     form = await request.form()
+#     sender = (form.get("from") or form.get("sender") or "").strip()
+#     subject = (form.get("subject") or "").strip()
+#     text = form.get("text") or ""
+#     html = form.get("html") or ""
+
+#     # --- Attachment debug: list all multipart fields and detect files ---
+#     attachments = []
+#     nonfile_log = []
+#     for key, value in form.multi_items():
+#         # UploadFile => actual binary attachment; str => normal field
+#         if hasattr(value, "filename") and value.filename:
+#             content = await value.read()
+#             attachments.append((value.filename, content))
+#             logger.info(f"[inbound] FILE part key={key!r} filename={value.filename!r} size={len(content)}")
+#         else:
+#             # Keep a short sample of non-file fields to see what SendGrid actually sent
+#             val = str(value)
+#             nonfile_log.append((key, (val[:80] + "…") if len(val) > 80 else val))
+
+#     if nonfile_log:
+#         logger.info(f"[inbound] NONFILE parts: {nonfile_log}")
+
+#     attachment_count = len(attachments)
+#     has_attachments = attachment_count > 0
+#     logger.info(f"[inbound] attachment_count={attachment_count}")
+
+#     # collect attachments (any part with a filename)
+#     attachments = []
+#     for _, value in form.multi_items():
+#         if isinstance(value, UploadFile) and (value.filename or "").strip():
+#             content = await value.read()
+#             attachments.append((value.filename, content))
+
+#     attachment_count = len(attachments)
+#     has_attachments = attachment_count > 0
+#     logger.info(f"[inbound] sender={sender} subject={subject!r} atts={attachment_count}")
+
+#     # 3) collect attachments (any part with a filename)
+#     attachments = []
+#     for _, value in form.multi_items():
+#         if isinstance(value, UploadFile) and (value.filename or "").strip():
+#             content = await value.read()
+#             attachments.append((value.filename, content))
+
+#     # 4) parse (your cleaner/LLM lives inside parse_inbound_email)
+#     address, dt_str, county = parse_inbound_email(text, html)
+
+#     # 5) normalize for matching
+#     n_addr = normalize(address or "")
+#     n_dt   = normalize_datetime(dt_str or "")
+#     n_cnty = normalize(county or "")
+
+
+#     # persist inbound email (direct columns)
+#     inbound_id = None
+#     try:
+#         inbound_row = models.InboundEmail(
+#             sender=sender,
+#             subject=subject,
+#             body=(text or html or "")[:10000],
+#             parsed_address=address or None,
+#             parsed_datetime=dt_str or None,
+#             parsed_county=county or None,
+#             has_attachments=has_attachments,
+#             attachment_count=attachment_count,
+#             # created_at is filled by DB default now()
+#         )
+#         db.add(inbound_row)
+#         db.commit()
+#         db.refresh(inbound_row)
+#         inbound_id = inbound_row.id
+#     except Exception as e:
+#         logger.warning(f"[inbound] persist failed: {e}")
+
+
+#     # 7) find a matching IncidentRequest (county filter + exact normalized address & datetime)
+#     # 7) find a matching IncidentRequest
+#     matched_request = None
+#     try:
+#         q = db.query(models.IncidentRequest)
+#         if n_cnty:
+#             q = q.filter(models.IncidentRequest.county.ilike(f"%{county}%"))
+
+#         # Prefer created_at if your IncidentRequest has it; else fall back to id
+#         if hasattr(models.IncidentRequest, "created_at"):
+#             q = q.order_by(models.IncidentRequest.created_at.desc())
+#         else:
+#             q = q.order_by(models.IncidentRequest.id.desc())
+
+#         candidates = q.limit(200).all()
+#         for r in candidates:
+#             if normalize(r.incident_address) == n_addr and normalize_datetime(r.incident_datetime) == n_dt:
+#                 matched_request = r
+#                 break
+#     except Exception as e:
+#         logger.warning(f"[inbound] match lookup failed: {e}")
+
+
+#     # 8) resolve recipient from stored JWT and forward
+#     forwarded = False
+#     if matched_request and getattr(matched_request, "user_token", None):
+#         try:
+#             payload = jwt.decode(matched_request.user_token, SECRET_KEY, algorithms=[ALGORITHM])
+#             username = payload.get("sub") or payload.get("username")
+#             if username:
+#                 user = db.query(models.User).filter(models.User.username == username).first()
+#                 if user and user.email:
+#                     logger.info(
+#                         f"[forward] to={user.email} files={attachment_count} "
+#                         f"req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
+#                     )
+#                     subj_out = f"Incident Report: {subject or 'reply'}"
+#                     body_out = text or html or ""
+#                     if has_attachments:
+#                         ok = send_attachments_to_user(user.email, subj_out, body_out, attachments)
+#                     else:
+#                         ok = send_alert_no_attachments(user.email, subj_out, body_out)
+#                     forwarded = bool(ok)
+#         except Exception as e:
+#             logger.warning(f"[forward] failed: {e}")
+
+
+#     return {
+#         "status": "received",
+#         "sender": sender,
+#         "parsed": {"address": address, "datetime": dt_str, "county": county},
+#         "match": getattr(matched_request, "id", None),
+#         "attachments": [name for name, _ in attachments],
+#         "forwarded": forwarded,
+#         "inbound_id": inbound_id,
+#     }
 
 
 
