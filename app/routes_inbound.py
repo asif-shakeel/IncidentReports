@@ -87,8 +87,8 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     files = _collect_attachments(form)
     log.info("[inbound] attachment_count=%d", len(files))
 
-    # parse (regex first; IRH_META supported inside email_parser)
-    address, dt_str, county = parse_inbound_email(text, html, len(files))  # third arg optional
+    # ✅ Call parser with 2 args (keeps compatibility with your current email_parser.py)
+    address, dt_str, county = parse_inbound_email(text, html)
     log.info("[inbound] parsed addr=%r dt=%r county=%r", address, dt_str, county)
 
     # persist inbound row
