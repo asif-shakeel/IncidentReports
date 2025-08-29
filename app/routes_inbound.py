@@ -27,6 +27,27 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     text = form.get("text") or ""
     html = form.get("html") or ""
 
+    # --- Attachment debug: list all multipart fields and detect files ---
+    attachments = []
+    nonfile_log = []
+    for key, value in form.multi_items():
+        # UploadFile => actual binary attachment; str => normal field
+        if hasattr(value, "filename") and value.filename:
+            content = await value.read()
+            attachments.append((value.filename, content))
+            logger.info(f"[inbound] FILE part key={key!r} filename={value.filename!r} size={len(content)}")
+        else:
+            # Keep a short sample of non-file fields to see what SendGrid actually sent
+            val = str(value)
+            nonfile_log.append((key, (val[:80] + "…") if len(val) > 80 else val))
+
+    if nonfile_log:
+        logger.info(f"[inbound] NONFILE parts: {nonfile_log}")
+
+    attachment_count = len(attachments)
+    has_attachments = attachment_count > 0
+    logger.info(f"[inbound] attachment_count={attachment_count}")
+
     # collect attachments (any part with a filename)
     attachments = []
     for _, value in form.multi_items():
