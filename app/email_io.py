@@ -19,25 +19,18 @@ def _sg():
 def send_request_email(
     to_email: str,
     subject: str,
-    content: str,
+    content: str,  # used only as intro text
     *,
     incident_address: str = "",
     incident_datetime: str = "",
     county: str = "",
 ):
-    """
-    Send county request as clean multipart (text + HTML).
-    Uses the three explicit fields as the single source of truth.
-    Keeps IRH_META for reliable parsing of replies.
-    """
-    log.info(
-        "[email] send_request_email -> to=%s addr=%r dt=%r county=%r",
-        to_email, incident_address, incident_datetime, county
-    )
+    log.info("[email] send_request_email -> to=%s addr=%r dt=%r county=%r",
+             to_email, incident_address, incident_datetime, county)
 
-    intro = content.strip() if content else "Please provide the incident report for the following details:"
+    intro = (content or "Please provide the incident report for the following details:").strip()
 
-    # Plain text (no duplicate label block)
+    # Plain text (one copy of the fields + IRH_META)
     plain_text = (
         f"{intro}\n"
         f"Address: {incident_address}\n"
@@ -46,8 +39,8 @@ def send_request_email(
         f"\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
     )
 
-    # HTML (single table; no second label block)
-    body_html = f"""<!doctype html>
+    # HTML (no second empty label block; hidden IRH_META present & filled)
+    html_content = f"""<!doctype html>
 <html>
   <body style="font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;">
     <p>{intro}</p>
@@ -68,10 +61,8 @@ def send_request_email(
         to_emails=[To(to_email)],
         subject=subject,
     )
-    # Use SendGrid Content objects to avoid 400s
     msg.add_content(Content("text/plain", plain_text))
-    msg.add_content(Content("text/html", body_html))
-
+    msg.add_content(Content("text/html",  html_content))
     if REPLY_TO_EMAIL:
         msg.reply_to = Email(REPLY_TO_EMAIL)
 
@@ -94,7 +85,7 @@ def send_attachments_to_user(user_email: str, subject: str, body: str, files: li
 
     msg = Mail(from_email=FROM_EMAIL, to_emails=user_email, subject=subject)
     msg.add_content(Content("text/plain", text_part))
-    msg.add_content(Content("text/html", html_part))
+    msg.add_content(Content("text/html",  html_part))
 
     for name, data in files:
         att = Attachment()
@@ -120,7 +111,7 @@ def send_alert_no_attachments(user_email: str, subject: str, body: str):
 
     msg = Mail(from_email=FROM_EMAIL, to_emails=user_email, subject=subject)
     msg.add_content(Content("text/plain", text_part))
-    msg.add_content(Content("text/html", html_part))
+    msg.add_content(Content("text/html",  html_part))
     resp = _sg().send(msg)
     log.info("[email] sent no-attachment alert to %s status=%s",
              user_email, getattr(resp, "status_code", "?"))
