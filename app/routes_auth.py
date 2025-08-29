@@ -10,11 +10,14 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User, IncidentRequest
 from app.schemas import RegisterRequest, IncidentRequestCreate
-from app.config import get_county_email_map, SECRET_KEY, ALGORITHM
+
 from app.email_io import send_request_email
 from auth import get_password_hash, verify_password, create_access_token
-
+import os
 from jose import JWTError, jwt
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
 
 logger = logging.getLogger("uvicorn.error").getChild("auth")
 
