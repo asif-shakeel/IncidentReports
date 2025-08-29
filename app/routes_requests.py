@@ -173,7 +173,14 @@ def create_incident_request(
         "incident_address": data.incident_address.strip(),
         "incident_datetime": data.incident_datetime.strip(),
         "county": data.county.strip(),
+        "to_email": to_email_resolved,  # if your table has this
     }
+
+
+    # explicit reply target
+    if "requester_email" in colnames and getattr(current_user, "email", None):
+        req_kwargs["requester_email"] = current_user.email
+
     if "to_email" in colnames:
         req_kwargs["to_email"] = to_email_resolved
     if "created_by" in colnames and getattr(current_user, "username", None):
