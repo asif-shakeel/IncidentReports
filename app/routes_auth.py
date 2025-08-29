@@ -14,7 +14,7 @@ from app.config import get_county_email, SECRET_KEY, ALGORITHM
 from app.email_io import send_request_email
 from auth import get_password_hash, verify_password, create_access_token
 
-logger = logging.getLogger("uvicorn.error").getChild("routes_auth")
+log = logging.getLogger("uvicorn.error").getChild("routes_auth")
 
 router = APIRouter(tags=["auth"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
@@ -24,8 +24,9 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.username == req.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
-    hashed = get_password_hash(req.password)
-    user = User(username=req.username, hashed_password=hashed, email=req.email)
+    user = User(username=req.username,
+                hashed_password=get_password_hash(req.password),
+                email=req.email)
     db.add(user); db.commit(); db.refresh(user)
     return {"msg": "User registered successfully"}
 
@@ -56,6 +57,12 @@ def create_incident_request(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Sanity log: make sure we actually got these from the client
+    log.info("[request] incoming fields addr=%r dt=%r county=%r",
+             getattr(req, "incident_address", None),
+             getattr(req, "incident_datetime", None),
+             getattr(req, "county", None))
+
     county_email = get_county_email(req.county)
     if not county_email:
         raise HTTPException(status_code=400, detail=f"No email found for county '{req.county}'")
@@ -71,14 +78,10 @@ def create_incident_request(
     db.add(new_request); db.commit(); db.refresh(new_request)
 
     subject = f"Fire Incident Report Request: {req.incident_datetime}"
-    content = (
-        "Please provide the incident report for the following details:\n"
-        f"Address: {req.incident_address}\n"
-        f"Date/Time: {req.incident_datetime}\n"
-        f"County: {req.county}"
-    )
+    # We’ll still include a human-friendly plain text header in Content below
+    content = "Please provide the incident report for the following details:"
 
-    # 🔒 Pass fields as keywords so the HTML template fills in
+    # Explicit keyword args so nothing goes blank
     send_request_email(
         to_email=county_email,
         subject=subject,
@@ -88,7 +91,7 @@ def create_incident_request(
         county=req.county,
     )
 
-    logger.info("[request] sent to %s for %s / %s / %s",
-                county_email, req.incident_address, req.incident_datetime, req.county)
+    log.info("[request] sent to %s for %s / %s / %s",
+             county_email, req.incident_address, req.incident_datetime, req.county)
 
     return {"msg": "Incident request created and email sent", "request_id": new_request.id}
