@@ -39,10 +39,13 @@ app = FastAPI(
 from app.routes_auth import router as auth_router
 from app.routes_inbound import router as inbound_router
 from app.routes_admin import router as admin_router
+from app.routes_requests import router as requests_router
 
 app.include_router(inbound_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
+
+app.include_router(requests_router)
 
 # 5) Ops endpoints (your originals, preserved)
 @app.get("/healthz", tags=["ops"])

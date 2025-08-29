@@ -1,5 +1,8 @@
+# =============================
+# FILE: app/routes_inbound.py
+# =============================
 import logging
-import os
+from typing import List, Tuple
 import jwt
 from fastapi import APIRouter, Request, Depends, UploadFile
 from sqlalchemy.orm import Session
@@ -15,8 +18,6 @@ except ImportError:
     from auth import SECRET_KEY, ALGORITHM
 
 logger = logging.getLogger("uvicorn.error").getChild("inbound")
-
-logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Optional GET probe so browser/health checks don't 405
@@ -35,11 +36,9 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     text = form.get("text") or ""
     html = form.get("html") or ""
 
-    # --- Attachment debug: list all multipart fields and detect files (robust) ---
-    attachments = []
+    # --- Attachment capture (robust) ---
+    attachments: List[Tuple[str, bytes]] = []
     nonfile_log = []
-
-    # 1) First pass: anything with a filename/read attrib is treated as a file
     for key, value in form.multi_items():
         is_file_like = hasattr(value, "filename") and hasattr(value, "read")
         if is_file_like and (getattr(value, "filename", "") or "").strip():
@@ -50,13 +49,11 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
             val = str(value)
             nonfile_log.append((key, (val[:80] + "…") if len(val) > 80 else val))
 
-    # 2) Fallback: if SendGrid says there are N attachments but none captured,
-    #    fetch them explicitly by known keys: attachment1..attachmentN
+    # Fallback: if SendGrid declares attachments but none captured, fetch attachment1..N
     try:
         declared = int(str(form.get("attachments") or "0").strip() or "0")
     except Exception:
         declared = 0
-
     if declared > 0 and not attachments:
         logger.info(f"[inbound] fallback: declared attachments={declared}, collecting attachment1..{declared}")
         for i in range(1, declared + 1):
@@ -73,9 +70,24 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     has_attachments = attachment_count > 0
     logger.info(f"[inbound] attachment_count={attachment_count}")
 
-
-    # --- Parse email body ---
+    # --- Parse body (regex-first, optional LLM via env) ---
     address, dt_str, county = parse_inbound_email(text, html)
+
+    # Header fallback: recover from X-IRH-* headers if present
+    if not (address and dt_str and county):
+        raw_headers = (form.get("headers") or "")
+        try:
+            for line in str(raw_headers).splitlines():
+                low = line.lower()
+                if low.startswith("x-irh-address:"):
+                    address = address or line.split(":", 1)[1].strip()
+                elif low.startswith("x-irh-datetime:"):
+                    dt_str = dt_str or line.split(":", 1)[1].strip()
+                elif low.startswith("x-irh-county:"):
+                    county = county or line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+
     logger.info(f"[inbound] parsed addr={address!r} dt={dt_str!r} county={county!r}")
 
     # --- Persist inbound email ---
@@ -98,7 +110,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.warning(f"[inbound] persist failed: {e}")
 
-    # --- Match against IncidentRequests ---
+    # --- Match and forward ---
     matched_request = None
     try:
         q = db.query(models.IncidentRequest)
@@ -117,7 +129,6 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.warning(f"[inbound] match lookup failed: {e}")
 
-    # --- Forward if matched ---
     forwarded = False
     if matched_request and getattr(matched_request, "user_token", None):
         try:
@@ -148,6 +159,179 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
         "forwarded": forwarded,
         "inbound_id": inbound_id,
     }
+
+
+# import logging
+# import os
+# import jwt
+# from fastapi import APIRouter, Request, Depends, UploadFile
+# from sqlalchemy.orm import Session
+# from app.database import get_db
+# from app import models
+# from app.email_parser import parse_inbound_email
+# from app.email_io import send_attachments_to_user, send_alert_no_attachments
+
+# # SECRET_KEY/ALGORITHM may live in app.config or root-level auth
+# try:
+#     from app.config import SECRET_KEY, ALGORITHM
+# except ImportError:
+#     from auth import SECRET_KEY, ALGORITHM
+
+# logger = logging.getLogger("uvicorn.error").getChild("inbound")
+
+# logger = logging.getLogger(__name__)
+# router = APIRouter()
+
+# # Optional GET probe so browser/health checks don't 405
+# @router.get("/inbound")
+# def inbound_probe():
+#     logger.info("[probe] GET /inbound called (health check)")
+#     return {"ok": True, "hint": "SendGrid should POST multipart/form-data here."}
+
+# @router.post("/inbound")
+# async def inbound(request: Request, db: Session = Depends(get_db)):
+#     form = await request.form()
+#     logger.info(f"[inbound] received form keys: {list(form.keys())}")
+
+#     sender = (form.get("from") or form.get("sender") or "").strip()
+#     subject = (form.get("subject") or "").strip()
+#     text = form.get("text") or ""
+#     html = form.get("html") or ""
+
+#     # --- Attachment debug: list all multipart fields and detect files (robust) ---
+#     attachments = []
+#     nonfile_log = []
+
+#     # 1) First pass: anything with a filename/read attrib is treated as a file
+#     for key, value in form.multi_items():
+#         is_file_like = hasattr(value, "filename") and hasattr(value, "read")
+#         if is_file_like and (getattr(value, "filename", "") or "").strip():
+#             content = await value.read()
+#             attachments.append((value.filename, content))
+#             logger.info(f"[inbound] FILE part key={key!r} filename={value.filename!r} size={len(content)}")
+#         else:
+#             val = str(value)
+#             nonfile_log.append((key, (val[:80] + "…") if len(val) > 80 else val))
+
+#     # 2) Fallback: if SendGrid says there are N attachments but none captured,
+#     #    fetch them explicitly by known keys: attachment1..attachmentN
+#     try:
+#         declared = int(str(form.get("attachments") or "0").strip() or "0")
+#     except Exception:
+#         declared = 0
+
+#     if declared > 0 and not attachments:
+#         logger.info(f"[inbound] fallback: declared attachments={declared}, collecting attachment1..{declared}")
+#         for i in range(1, declared + 1):
+#             part = form.get(f"attachment{i}")
+#             if part and hasattr(part, "filename") and hasattr(part, "read"):
+#                 content = await part.read()
+#                 attachments.append((part.filename, content))
+#                 logger.info(f"[inbound] FILE part (fallback) key='attachment{i}' filename={part.filename!r} size={len(content)}")
+
+#     if nonfile_log:
+#         logger.info(f"[inbound] NONFILE parts: {nonfile_log}")
+
+#     attachment_count = len(attachments)
+#     has_attachments = attachment_count > 0
+#     logger.info(f"[inbound] attachment_count={attachment_count}")
+
+
+#     # --- Parse email body ---
+#     # address, dt_str, county = parse_inbound_email(text, html)
+#     # logger.info(f"[inbound] parsed addr={address!r} dt={dt_str!r} county={county!r}")
+
+#     # --- Parse email body (regex-first; optional LLM via PARSER_USE_LLM) ---
+#     address, dt_str, county = parse_inbound_email(text, html)
+
+#     # Fallback: recover fields from our own outbound headers if present
+#     if not (address and dt_str and county):
+#         raw_headers = (form.get("headers") or "")
+#         try:
+#             for line in str(raw_headers).splitlines():
+#                 low = line.lower()
+#                 if low.startswith("x-irh-address:"):
+#                     address = address or line.split(":", 1)[1].strip()
+#                 elif low.startswith("x-irh-datetime:"):
+#                     dt_str = dt_str or line.split(":", 1)[1].strip()
+#                 elif low.startswith("x-irh-county:"):
+#                     county = county or line.split(":", 1)[1].strip()
+#         except Exception:
+#             pass
+
+#     logger.info(f"[inbound] parsed addr={address!r} dt={dt_str!r} county={county!r}")
+
+
+#     # --- Persist inbound email ---
+#     inbound_id = None
+#     try:
+#         inbound_row = models.InboundEmail(
+#             sender=sender,
+#             subject=subject,
+#             body=(text or html or "")[:10000],
+#             parsed_address=address or None,
+#             parsed_datetime=dt_str or None,
+#             parsed_county=county or None,
+#             has_attachments=has_attachments,
+#             attachment_count=attachment_count,
+#         )
+#         db.add(inbound_row)
+#         db.commit()
+#         db.refresh(inbound_row)
+#         inbound_id = inbound_row.id
+#     except Exception as e:
+#         logger.warning(f"[inbound] persist failed: {e}")
+
+#     # --- Match against IncidentRequests ---
+#     matched_request = None
+#     try:
+#         q = db.query(models.IncidentRequest)
+#         if county:
+#             q = q.filter(models.IncidentRequest.county.ilike(f"%{county}%"))
+#         if hasattr(models.IncidentRequest, "created_at"):
+#             q = q.order_by(models.IncidentRequest.created_at.desc())
+#         else:
+#             q = q.order_by(models.IncidentRequest.id.desc())
+#         candidates = q.limit(200).all()
+#         for r in candidates:
+#             if (r.incident_address or "").strip().lower() == (address or "").strip().lower() and \
+#                (r.incident_datetime or "").strip() == (dt_str or "").strip():
+#                 matched_request = r
+#                 break
+#     except Exception as e:
+#         logger.warning(f"[inbound] match lookup failed: {e}")
+
+#     # --- Forward if matched ---
+#     forwarded = False
+#     if matched_request and getattr(matched_request, "user_token", None):
+#         try:
+#             payload = jwt.decode(matched_request.user_token, SECRET_KEY, algorithms=[ALGORITHM])
+#             username = payload.get("sub") or payload.get("username")
+#             if username:
+#                 user = db.query(models.User).filter(models.User.username == username).first()
+#                 if user and user.email:
+#                     logger.info(
+#                         f"[forward] to={user.email} files={attachment_count} req_id={getattr(matched_request,'id',None)} inbound_id={inbound_id}"
+#                     )
+#                     subj_out = f"Incident Report: {subject or 'reply'}"
+#                     body_out = text or html or ""
+#                     if has_attachments:
+#                         ok = send_attachments_to_user(user.email, subj_out, body_out, attachments)
+#                     else:
+#                         ok = send_alert_no_attachments(user.email, subj_out, body_out)
+#                     forwarded = bool(ok)
+#         except Exception as e:
+#             logger.warning(f"[forward] failed: {e}")
+
+#     return {
+#         "status": "received",
+#         "sender": sender,
+#         "parsed": {"address": address, "datetime": dt_str, "county": county},
+#         "match": getattr(matched_request, "id", None),
+#         "attachments": [fn for fn, _ in attachments],
+#         "forwarded": forwarded,
+#         "inbound_id": inbound_id,
+#     }
 
 
 # from fastapi import APIRouter, Request, Depends, UploadFile
