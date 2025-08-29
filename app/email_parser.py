@@ -1,8 +1,8 @@
-
-# app/email_parser.py — regex-first parser with optional LLM fallback (OpenAI v1)
-# Exports: parse_inbound_email(text: str, html: str, attachment_count: int | None = None) -> tuple[str, str, str]
-# LLM is OFF by default (PARSER_USE_LLM=0). Set PARSER_USE_LLM=1 and OPENAI_API_KEY to enable.
-
+# =============================
+# FILE: app/email_parser.py
+# Purpose: Robust extraction without LLM using regex + IRH_META footer + quoted-scan
+#          Optional LLM fallback using OpenAI v1 when enabled by env.
+# =============================
 from __future__ import annotations
 import os
 import re
@@ -12,59 +12,17 @@ import hashlib
 from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
-META_RE = re.compile(
-    r"IRH_META:\s*(?:Address=(?P<addr>[^|]+))?(?:\s*\|\s*DateTime=(?P<dt>[^|]+))?(?:\s*\|\s*County=(?P<county>.+))?",
-    re.IGNORECASE,
-)
 
-def _from_meta(raw_text: str):
-    m = META_RE.search(raw_text or "")
-    if not m:
-        return "", "", ""
-    addr = (m.group("addr") or "").strip()
-    dt   = (m.group("dt") or "").strip()
-    cty  = (m.group("county") or "").strip()
-    if addr or dt or cty:
-        logger.info("[parser] meta_hit from IRH_META")
-    return addr, dt, cty
-
-def _unquote_all(raw_text: str) -> str:
-    """Keep quoted block content by stripping leading > and not cutting at 'On ... wrote:'."""
-    raw = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    lines = []
-    for line in raw.split("\n"):
-        # drop common Gmail quote div markers when present in html->text
-        s = re.sub(r"^\s*>\s*", "", line).strip()
-        if s:
-            lines.append(s)
-    return "\n".join(lines)
-
-# ---------------- Runtime toggles ----------------
-USE_LLM = os.getenv("PARSER_USE_LLM", "0") == "1"  # default OFF
+# --------- Runtime toggles ---------
+USE_LLM = os.getenv("PARSER_USE_LLM", "0") == "1"   # default OFF
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LLM_MODEL = os.getenv("PARSER_LLM_MODEL", "gpt-5o-mini")
+LLM_MODEL = os.getenv("PARSER_LLM_MODEL", "gpt-4o-mini")
 LLM_MAX_CALLS_PER_MIN = int(os.getenv("LLM_MAX_CALLS_PER_MIN", "2"))
 
-_CALLS = []  # timestamps in last 60s
-_SEEN = set()  # hashes of cleaned bodies
+_CALLS: list[float] = []  # timestamps in last 60s
+_SEEN: set[str] = set()   # hashes of cleaned bodies
 
-
-def _may_call_llm(cleaned_text: str) -> bool:
-    key = hashlib.sha256(cleaned_text.strip().encode("utf-8")).hexdigest()[:16]
-    if key in _SEEN:
-        logger.info("[parser] LLM skip: duplicate body")
-        return False
-    now = time.time()
-    global _CALLS
-    _CALLS = [t for t in _CALLS if now - t < 60]
-    if len(_CALLS) >= LLM_MAX_CALLS_PER_MIN:
-        logger.info("[parser] LLM skip: rate limited by app guard")
-        return False
-    _CALLS.append(now)
-    _SEEN.add(key)
-    return True
-
-# ---------------- HTML -> text ----------------
+# --------- HTML → text ---------
 try:
     from bs4 import BeautifulSoup  # type: ignore
 except Exception:  # pragma: no cover
@@ -85,7 +43,7 @@ def html_to_text(html: str) -> str:
         pass
     return txt
 
-# ---------------- Cleaning ----------------
+# --------- Cleaning ---------
 RE_QUOTE_SPLIT = re.compile(
     r"^\s*(On .* wrote:|From:\s.*|-----Original Message-----)\s*$",
     re.IGNORECASE | re.MULTILINE,
@@ -111,14 +69,12 @@ def clean_reply_body(body_text: str = "", body_html: str = "") -> str:
             break
         lines.append(s)
     cleaned = "\n".join(lines).strip()
-
     cleaned = re.sub(r"^\s*[-*•]\s*", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
-
     logger.info(f"[parser] body_clean[:200]={cleaned[:200]!r}")
     return cleaned
 
-# ---------------- Extraction (regex first) ----------------
+# --------- Regex extraction ---------
 RE_ADDR = re.compile(r"^\s*>?\s*(Address|Location|Incident\s*Address)\s*[:\-]\s*(.+)$", re.IGNORECASE)
 RE_DT   = re.compile(r"^\s*>?\s*(Date/Time|Date\s*Time|When|Incident\s*(Date|Time))\s*[:\-]\s*(.+)$", re.IGNORECASE)
 RE_CNTY = re.compile(r"^\s*>?\s*(County|Jurisdiction|Agency)\s*[:\-]\s*(.+)$", re.IGNORECASE)
@@ -145,17 +101,60 @@ def extract_fields_from_body(cleaned: str) -> Tuple[str, str, str]:
         logger.info(f"[parser] regex_hit addr={address!r} dt={dt_str!r} county={county!r}")
     return address or "", dt_str or "", county or ""
 
-# ---------------- Optional LLM fallback (OpenAI v1) ----------------
+# --------- META footer + quoted scan ---------
+META_RE = re.compile(
+    r"IRH_META:\s*(?:Address=(?P<addr>[^|\n]+))?(?:\s*\|\s*DateTime=(?P<dt>[^|\n]+))?(?:\s*\|\s*County=(?P<county>[^\n]+))?",
+    re.IGNORECASE,
+)
+
+
+def _from_meta(raw_text: str) -> Tuple[str, str, str]:
+    m = META_RE.search(raw_text or "")
+    if not m:
+        return "", "", ""
+    addr = (m.group("addr") or "").strip()
+    dt   = (m.group("dt") or "").strip()
+    cty  = (m.group("county") or "").strip()
+    if addr or dt or cty:
+        logger.info("[parser] meta_hit from IRH_META")
+    return addr, dt, cty
+
+
+def _unquote_all(raw_text: str) -> str:
+    """Keep quoted block by stripping leading `>` and NOT cutting at quote markers."""
+    raw = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in raw.split("\n"):
+        s = re.sub(r"^\s*>\s*", "", line).strip()
+        if s:
+            lines.append(s)
+    return "\n".join(lines)
+
+# --------- LLM fallback (OpenAI v1) ---------
+
+def _may_call_llm(cleaned_text: str) -> bool:
+    key = hashlib.sha256(cleaned_text.strip().encode("utf-8")).hexdigest()[:16]
+    if key in _SEEN:
+        logger.info("[parser] LLM skip: duplicate body")
+        return False
+    now = time.time()
+    global _CALLS
+    _CALLS = [t for t in _CALLS if now - t < 60]
+    if len(_CALLS) >= LLM_MAX_CALLS_PER_MIN:
+        logger.info("[parser] LLM skip: rate limited by app guard")
+        return False
+    _CALLS.append(now)
+    _SEEN.add(key)
+    return True
+
 
 def llm_extract_fields_once(cleaned_text: str) -> Tuple[str, str, str]:
     if not (USE_LLM and OPENAI_API_KEY):
         logger.info("[parser] LLM disabled or no API key; skipping")
         return "", "", ""
     try:
-        # OpenAI Python SDK >= 1.0.0
         from openai import OpenAI  # type: ignore
         client = OpenAI(api_key=OPENAI_API_KEY)
-
         prompt = (
             "Extract Address, Date/Time, and County from the email reply. "
             "Ignore quoted text and signatures. Respond ONLY as JSON with keys: address, datetime, county.\n\n"
@@ -179,21 +178,24 @@ def llm_extract_fields_once(cleaned_text: str) -> Tuple[str, str, str]:
             logger.warning(f"[parser] LLM parse failed: {e}")
         return "", "", ""
 
-# ---------------- Public entry ----------------
+# --------- Public entry ---------
+
 def parse_inbound_email(text: str, html: str, attachment_count: Optional[int] = None) -> Tuple[str, str, str]:
-    # 0) Try META anywhere in raw (works even if reply body is short)
+    """Return (address, dt_str, county). Order: META → cleaned regex → quoted regex → LLM."""
     raw_full = (text or html_to_text(html) or "")
+
+    # 0) IRH_META anywhere in raw
     ma, md, mc = _from_meta(raw_full)
     if ma or md or mc:
         return ma or "", md or "", mc or ""
 
-    # 1) Regex on cleaned (current behavior)
+    # 1) Regex on cleaned (human reply body)
     body_clean = clean_reply_body(text, html)
     address, dt_str, county = extract_fields_from_body(body_clean)
     if address and dt_str and county:
         return address, dt_str, county
 
-    # 2) Regex on QUOTED block (don’t cut at “On … wrote:”)
+    # 2) Regex on unquoted full text (includes quoted original)
     unquoted = _unquote_all(raw_full)
     qa, qd, qc = extract_fields_from_body(unquoted)
     if qa and qd and qc:
@@ -208,6 +210,7 @@ def parse_inbound_email(text: str, html: str, attachment_count: Optional[int] = 
         county  = county or lc
 
     return address or "", dt_str or "", county or ""
+
 
 # def parse_inbound_email(text: str, html: str, attachment_count: Optional[int] = None) -> Tuple[str, str, str]:
 #     """Return (address, dt_str, county). Regex first; optional LLM if missing."""

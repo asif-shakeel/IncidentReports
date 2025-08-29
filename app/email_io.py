@@ -1,5 +1,5 @@
 # =============================
-# FILE: app/email_io.py
+# FILE: app/email_io.py (with IRH_META footer)
 # =============================
 import os
 import base64
@@ -21,15 +21,24 @@ def send_request_email(
     incident_datetime: str | None = None,
     county: str | None = None,
 ) -> bool:
-    """
-    Sends the outbound request email with optional machine-readable headers.
-    Adds Reply-To so replies hit your SendGrid Inbound Parse subdomain.
+    """Send the outbound request email with Reply-To and machine-readable footer.
+    Adds IRH_META line that survives quoting plus optional X-IRH-* headers.
     """
     if not SENDGRID_API_KEY:
         raise RuntimeError("SENDGRID_API_KEY is not set")
 
     sg = SendGridAPIClient(SENDGRID_API_KEY)
-    # Build a machine-readable footer that tends to survive quoting
+
+    # Build headers for extra robustness (may not survive reply)
+    headers: dict[str, str] = {}
+    if incident_address:
+        headers["X-IRH-Address"] = incident_address
+    if incident_datetime:
+        headers["X-IRH-DateTime"] = incident_datetime
+    if county:
+        headers["X-IRH-County"] = county
+
+    # Build META footer that *does* survive quoting in most clients
     meta_parts = []
     if incident_address:
         meta_parts.append(f"Address={incident_address}")
@@ -39,31 +48,15 @@ def send_request_email(
         meta_parts.append(f"County={county}")
     meta_line = f"IRH_META: {' | '.join(meta_parts)}" if meta_parts else ""
 
-    # Append footer visibly at the end of the email body
     body_with_meta = content.rstrip() + ("\n\n" + meta_line if meta_line else "")
 
     message = Mail(
         from_email=FROM_EMAIL,
         to_emails=to_email,
         subject=subject,
-        plain_text_content=body_with_meta,  # <— use the version with meta
+        plain_text_content=body_with_meta,
     )
-
-    # message = Mail(
-    #     from_email=FROM_EMAIL,
-    #     to_emails=to_email,
-    #     subject=subject,
-    #     plain_text_content=content,
-    # )
     message.reply_to = Email(REPLY_TO_EMAIL)
-
-    headers: dict[str, str] = {}
-    if incident_address:
-        headers["X-IRH-Address"] = incident_address
-    if incident_datetime:
-        headers["X-IRH-DateTime"] = incident_datetime
-    if county:
-        headers["X-IRH-County"] = county
     if headers:
         message.headers = headers
 
@@ -79,7 +72,6 @@ def send_attachments_to_user(
     body_text: str,
     attachments: List[Tuple[str, bytes]],
 ) -> bool:
-    """Send an email to a user with binary attachments."""
     if not SENDGRID_API_KEY:
         raise RuntimeError("SENDGRID_API_KEY is not set")
     sg = SendGridAPIClient(SENDGRID_API_KEY)
@@ -104,14 +96,11 @@ def send_attachments_to_user(
 
 
 def send_alert_no_attachments(to_email: str, subject: str, body_text: str) -> bool:
-    """Send a notification when no attachments were found."""
     if not SENDGRID_API_KEY:
         raise RuntimeError("SENDGRID_API_KEY is not set")
     sg = SendGridAPIClient(SENDGRID_API_KEY)
-
     m = Mail(from_email=FROM_EMAIL, to_emails=to_email, subject=subject, plain_text_content=body_text)
     m.reply_to = Email(REPLY_TO_EMAIL)
-
     resp = sg.send(m)
     if resp.status_code != 202:
         raise RuntimeError(f"Failed to send email: {resp.status_code} {resp.body}")
