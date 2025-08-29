@@ -14,58 +14,59 @@ def _sg():
         raise RuntimeError("Missing SENDGRID_API_KEY")
     return SendGridAPIClient(key)
 
+# ---------- County outbound (request) ----------
+
 def send_request_email(to_email: str, subject: str, content: str,
                        incident_address: str = "", incident_datetime: str = "", county: str = ""):
-    """
-    Sends the initial county request as multipart (plain text + HTML).
-    Keeps IRH_META (machine-friendly) while giving humans a clean HTML view.
-    """
     meta = f"\n\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
     body_text = (content or "").rstrip() + meta
 
-    # A simple, robust HTML body (no fancy CSS so it renders everywhere)
-    body_html = f"""\
-<!doctype html>
+    body_html = f"""<!doctype html>
 <html>
-  <body style="font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;">
+  <body style=\"font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;\">
     <p>Please provide the incident report for the following details:</p>
-    <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-top:8px;">
-      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Address:</td><td>{incident_address}</td></tr>
-      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Date/Time:</td><td>{incident_datetime}</td></tr>
-      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">County:</td><td>{county}</td></tr>
+    <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse; margin-top:8px;\">
+      <tr><td style=\"padding:2px 8px 2px 0; font-weight:bold;\">Address:</td><td>{incident_address}</td></tr>
+      <tr><td style=\"padding:2px 8px 2px 0; font-weight:bold;\">Date/Time:</td><td>{incident_datetime}</td></tr>
+      <tr><td style=\"padding:2px 8px 2px 0; font-weight:bold;\">County:</td><td>{county}</td></tr>
     </table>
-    <p style="margin-top:16px;">Thank you,</p>
+    <p style=\"margin-top:16px;\">Thank you,</p>
     <p>Incident Report Hub</p>
-
-    <!-- Keep the machine-friendly footer (hidden to most users but still present).
-         We also include it in the plain text part, so even if this is stripped, the text copy remains. -->
-    <div style="display:none; visibility:hidden; mso-hide:all;">
+    <div style=\"display:none; visibility:hidden; mso-hide:all;\">
       IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}
     </div>
   </body>
-</html>
-"""
+</html>"""
 
-    msg = Mail(
-        from_email=Email(FROM_EMAIL),
-        to_emails=[To(to_email)],
-        subject=subject,
-    )
-    # Add both parts explicitly
+    msg = Mail(from_email=Email(FROM_EMAIL), to_emails=[To(to_email)], subject=subject)
     msg.add_content(Content("text/plain", body_text))
     msg.add_content(Content("text/html", body_html))
-
     if REPLY_TO_EMAIL:
         msg.reply_to = Email(REPLY_TO_EMAIL)
 
     _sg().send(msg)
     log.info("[email] sent request to %s (reply_to=%s)", to_email, REPLY_TO_EMAIL)
 
-def send_attachments_to_user(to_email: str, subject: str, body: str, files: list[tuple[str, bytes]]):
-    """
-    Forward inbound attachments to the requester. `files` is a list of (name, bytes).
-    """
-    msg = Mail(from_email=FROM_EMAIL, to_emails=to_email, subject=subject, plain_text_content=body)
+# ---------- Forward inbound to requester (with attachments) ----------
+
+def send_attachments_to_user(user_email: str, subject: str, body: str, files: list[tuple[str, bytes]]):
+    names = ", ".join([n for n, _ in files]) if files else "(none)"
+    text_part = (body or "Attached are the files we received.") + f"\n\nAttachments: {names}"
+
+    rows = "".join([f"<li>{n}</li>" for n, _ in files])
+    html_part = f"""<!doctype html>
+<html>
+  <body style=\"font-family:Arial,Helvetica,sans-serif; line-height:1.5; color:#222; font-size:14px;\">
+    <p>We received a reply to your incident report request. The files are attached below.</p>
+    <ul style=\"margin:8px 0 16px 20px;\">{rows}</ul>
+    <p>If anything looks off, just reply to this email.</p>
+  </body>
+</html>"""
+
+    msg = Mail(from_email=FROM_EMAIL, to_emails=user_email, subject=subject)
+    msg.add_content(Content("text/plain", text_part))
+    msg.add_content(Content("text/html", html_part))
+
     for name, data in files:
         att = Attachment()
         att.file_content = base64.b64encode(data).decode()
@@ -73,10 +74,24 @@ def send_attachments_to_user(to_email: str, subject: str, body: str, files: list
         att.file_name = name
         att.disposition = "attachment"
         msg.add_attachment(att)
-    _sg().send(msg)
-    log.info("[email] forwarded %d attachment(s) to %s", len(files), to_email)
 
-def send_alert_no_attachments(to_email: str, subject: str, body: str):
-    msg = Mail(from_email=FROM_EMAIL, to_emails=to_email, subject=subject, plain_text_content=body)
     _sg().send(msg)
-    log.info("[email] sent no-attachment alert to %s", to_email)
+    log.info("[email] forwarded %d attachment(s) to %s", len(files), user_email)
+
+# ---------- Notify requester when no attachments were found ----------
+
+def send_alert_no_attachments(user_email: str, subject: str, body: str):
+    text_part = body or "A reply was received but contained no attachments."
+    html_part = f"""<!doctype html>
+<html>
+  <body style=\"font-family:Arial,Helvetica,sans-serif; line-height:1.5; color:#222; font-size:14px;\">
+    <p>A reply was received but contained <strong>no attachments</strong>.</p>
+    <p>{text_part}</p>
+  </body>
+</html>"""
+
+    msg = Mail(from_email=FROM_EMAIL, to_emails=user_email, subject=subject)
+    msg.add_content(Content("text/plain", text_part))
+    msg.add_content(Content("text/html", html_part))
+    _sg().send(msg)
+    log.info("[email] sent no-attachment alert to %s", user_email)

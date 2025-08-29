@@ -40,10 +40,13 @@ def healthz():
 def ping():
     return {"pong": True}
 
+
+
 @app.get("/", include_in_schema=False)
 def root():
-    # If you expose docs, you can redirect. Otherwise just return JSON.
     try:
+        # If docs are enabled, a soft redirect gives bots a 302 instead of 404
         return RedirectResponse(url="/docs", status_code=302)
     except Exception:
+        # If docs are disabled, return a simple OK JSON instead
         return JSONResponse({"ok": True, "service": "IncidentReportHub"}, headers={"Cache-Control": "no-store"})
