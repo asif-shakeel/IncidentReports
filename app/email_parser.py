@@ -1,7 +1,8 @@
 
-# =============================
-# FILE: app/email_parser.py
-# =============================
+# app/email_parser.py — regex-first parser with optional LLM fallback (OpenAI v1)
+# Exports: parse_inbound_email(text: str, html: str, attachment_count: int | None = None) -> tuple[str, str, str]
+# LLM is OFF by default (PARSER_USE_LLM=0). Set PARSER_USE_LLM=1 and OPENAI_API_KEY to enable.
+
 from __future__ import annotations
 import os
 import re
@@ -118,29 +119,31 @@ def extract_fields_from_body(cleaned: str) -> Tuple[str, str, str]:
         logger.info(f"[parser] regex_hit addr={address!r} dt={dt_str!r} county={county!r}")
     return address or "", dt_str or "", county or ""
 
-# ---------------- Optional LLM fallback ----------------
+# ---------------- Optional LLM fallback (OpenAI v1) ----------------
 
 def llm_extract_fields_once(cleaned_text: str) -> Tuple[str, str, str]:
     if not (USE_LLM and OPENAI_API_KEY):
         logger.info("[parser] LLM disabled or no API key; skipping")
         return "", "", ""
     try:
-        import json
-        import openai  # type: ignore
-        openai.api_key = OPENAI_API_KEY
+        # OpenAI Python SDK >= 1.0.0
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
         prompt = (
             "Extract Address, Date/Time, and County from the email reply. "
             "Ignore quoted text and signatures. Respond ONLY as JSON with keys: address, datetime, county.\n\n"
             f"Email:\n{cleaned_text[:12000]}"
         )
-        logger.info("[parser] invoking LLM fallback")
-        resp = openai.ChatCompletion.create(
+        logger.info("[parser] invoking LLM fallback (v1 api)")
+        resp = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
-        content = resp["choices"][0]["message"]["content"].strip()
-        data = json.loads(content)
+        content = (resp.choices[0].message.content or "").strip()
+        import json as _json
+        data = _json.loads(content)
         return data.get("address", ""), data.get("datetime", ""), data.get("county", "")
     except Exception as e:
         msg = str(e)
@@ -164,6 +167,7 @@ def parse_inbound_email(text: str, html: str, attachment_count: Optional[int] = 
         county = county or lc
 
     return address or "", dt_str or "", county or ""
+
 
 # # app/email_parser.py — enhanced parser (regex-first, optional LLM)
 # # Exports: parse_inbound_email(text: str, html: str, attachment_count: int | None = None) -> tuple[str, str, str]
