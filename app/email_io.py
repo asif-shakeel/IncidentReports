@@ -16,58 +16,68 @@ def _sg():
         raise RuntimeError("Missing SENDGRID_API_KEY")
     return SendGridAPIClient(key)
 
+# ================================
+# FILE: app/email_io.py
+# ================================
+import os
+import logging
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, Email, To, Content
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "request@repo.incidentreportshub.com")
+REPLY_TO_EMAIL = os.getenv("REPLY_TO_EMAIL", "intake@repo.incidentreportshub.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "alert@repo.incidentreportshub.com")
+
+log = logging.getLogger(__name__)
+
+
 def send_request_email(
     to_email: str,
     subject: str,
-    content: str,  # used only as intro text
-    *,
     incident_address: str = "",
     incident_datetime: str = "",
     county: str = "",
 ):
-    log.info("[email] send_request_email -> to=%s addr=%r dt=%r county=%r",
-             to_email, incident_address, incident_datetime, county)
+    if not SENDGRID_API_KEY:
+        log.error("[email] SENDGRID_API_KEY missing; cannot send")
+        return
 
-    intro = (content or "Please provide the incident report for the following details:").strip()
-
-    # Plain text (one copy of the fields + IRH_META)
     plain_text = (
-        f"{intro}\n"
+        "Please provide the incident report for the following details:\n"
         f"Address: {incident_address}\n"
         f"Date/Time: {incident_datetime}\n"
         f"County: {county}\n"
-        f"\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
     )
 
-    # HTML (no second empty label block; hidden IRH_META present & filled)
-    html_content = f"""<!doctype html>
-<html>
-  <body style="font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;">
-    <p>{intro}</p>
-    <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-top:8px;">
-      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Address:</td><td>{incident_address}</td></tr>
-      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Date/Time:</td><td>{incident_datetime}</td></tr>
-      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">County:</td><td>{county}</td></tr>
-    </table>
-    <p style="margin-top:16px;">Thank you,<br>Incident Report Hub</p>
-    <div style="display:none; visibility:hidden; mso-hide:all;">
-      IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}
-    </div>
-  </body>
-</html>"""
+    html_content = f"""
+    <p>Please provide the incident report for the following details:</p>
+    <p><strong>Address:</strong> {incident_address}</p>
+    <p><strong>Date/Time:</strong> {incident_datetime}</p>
+    <p><strong>County:</strong> {county}</p>
+    <hr>
+    <p style=\"font-size:10px;color:#888;\">IRH_META Address={incident_address} | DateTime={incident_datetime} | County={county}</p>
+    """
 
-    msg = Mail(
+    message = Mail(
         from_email=Email(FROM_EMAIL),
-        to_emails=[To(to_email)],
+        to_emails=To(to_email),
         subject=subject,
+        plain_text_content=Content("text/plain", plain_text),
+        html_content=Content("text/html", html_content),
     )
-    msg.add_content(Content("text/plain", plain_text))
-    msg.add_content(Content("text/html",  html_content))
-    if REPLY_TO_EMAIL:
-        msg.reply_to = Email(REPLY_TO_EMAIL)
 
-    resp = _sg().send(msg)
-    log.info("[email] sent request to %s status=%s", to_email, getattr(resp, "status_code", "?"))
+    if REPLY_TO_EMAIL:
+        message.reply_to = Email(REPLY_TO_EMAIL)
+
+    try:
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        log.info("[email] sent request to %s, status=%s", to_email, response.status_code)
+    except Exception as e:
+        log.exception("[email] failed to send request: %s", str(e))
+
+
 
 def send_attachments_to_user(user_email: str, subject: str, body: str, files: list[tuple[str, bytes]]):
     names = ", ".join([n for n, _ in files]) if files else "(none)"
