@@ -2,7 +2,6 @@
 # FILE: app/routes_requests.py
 # Purpose: Create incident requests (AUTH REQUIRED), auto-resolve county inbox,
 #          and store who requested it (created_by, requester_email).
-# Lookup order for recipient county email: override > DB CountyContact > CSV > ENV
 # =============================
 from __future__ import annotations
 import logging
@@ -26,12 +25,12 @@ requests_router = APIRouter(tags=["requests"])  # import this in main.py
 # ---------- Auth dependency ----------
 try:
     from app.routes_auth import get_current_user  # must return models.User with .username/.email
-except Exception:  # fallback (expects PyJWT installed)
+except ImportError:  # fallback (makes sure we have something)
     import jwt
     try:
         from app.config import SECRET_KEY, ALGORITHM
-    except Exception:
-        from auth import SECRET_KEY, ALGORITHM  # root level fallback
+    except ImportError:
+        from auth import SECRET_KEY, ALGORITHM  # root-level fallback
 
     def get_current_user(authorization: str | None = None, db: Session = Depends(get_db)):
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -47,7 +46,6 @@ except Exception:  # fallback (expects PyJWT installed)
         user = db.query(models.User).filter(models.User.username == username).first()
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
-        setattr(user, "token", token)
         return user
 
 # ---------- Config helpers ----------
@@ -111,13 +109,13 @@ def _lookup_to_email(db: Session, county: str, override: Optional[str] = None) -
     except Exception as e:
         logger.warning(f"[requests] CountyContact lookup failed: {e}")
 
-    m_csv = _csv_county_map()
-    if name.lower() in m_csv:
-        return m_csv[name.lower()]
+    csv_map = _csv_county_map()
+    if name.lower() in csv_map:
+        return csv_map[name.lower()]
 
-    m_env = _env_county_map()
-    if name.lower() in m_env:
-        return m_env[name.lower()]
+    env_map = _env_county_map()
+    if name.lower() in env_map:
+        return env_map[name.lower()]
 
     raise HTTPException(status_code=400, detail="No county contact found; provide to_email or configure mapping.")
 
@@ -135,10 +133,12 @@ def create_incident_request(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    to_email_resolved = _lookup_to_email(db, data.county, str(data.to_email) if data.to_email else None)
+    to_email_resolved = _lookup_to_email(
+        db, data.county, str(data.to_email) if data.to_email else None
+    )
 
     colnames = {c.name for c in models.IncidentRequest.__table__.columns}
-    req_kwargs = {
+    req_kwargs: dict[str, any] = {
         "incident_address": data.incident_address.strip(),
         "incident_datetime": data.incident_datetime.strip(),
         "county": data.county.strip(),
@@ -151,7 +151,7 @@ def create_incident_request(
         req_kwargs["requester_email"] = current_user.email
 
     try:
-        req = models.IncidentRequest(**{k: v for k, v in req_kwargs.items() if k in colnames})
+        req = models.IncidentRequest(**req_kwargs)
         db.add(req)
         db.commit()
         db.refresh(req)
