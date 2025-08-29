@@ -25,27 +25,38 @@ def send_request_email(
     incident_datetime: str = "",
     county: str = "",
 ):
-    log.info("[email] send_request_email -> to=%s addr=%r dt=%r county=%r",
-             to_email, incident_address, incident_datetime, county)
+    """
+    Send county request as clean multipart (text + HTML).
+    Uses the three explicit fields as the single source of truth.
+    Keeps IRH_META for reliable parsing of replies.
+    """
+    log.info(
+        "[email] send_request_email -> to=%s addr=%r dt=%r county=%r",
+        to_email, incident_address, incident_datetime, county
+    )
 
-    # Build both parts fully (don’t rely on 'content' having the fields)
+    intro = content.strip() if content else "Please provide the incident report for the following details:"
+
+    # Plain text (no duplicate label block)
     plain_text = (
-        f"{content}\n"
+        f"{intro}\n"
         f"Address: {incident_address}\n"
         f"Date/Time: {incident_datetime}\n"
         f"County: {county}\n"
         f"\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
     )
 
-    html_content = f"""<!doctype html>
+    # HTML (single table; no second label block)
+    body_html = f"""<!doctype html>
 <html>
   <body style="font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;">
-    <p>{content}</p>
+    <p>{intro}</p>
     <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-top:8px;">
       <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Address:</td><td>{incident_address}</td></tr>
       <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Date/Time:</td><td>{incident_datetime}</td></tr>
       <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">County:</td><td>{county}</td></tr>
     </table>
+    <p style="margin-top:16px;">Thank you,<br>Incident Report Hub</p>
     <div style="display:none; visibility:hidden; mso-hide:all;">
       IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}
     </div>
@@ -56,9 +67,11 @@ def send_request_email(
         from_email=Email(FROM_EMAIL),
         to_emails=[To(to_email)],
         subject=subject,
-        plain_text_content=Content("text/plain", plain_text),
-        html_content=Content("text/html", html_content),
     )
+    # Use SendGrid Content objects to avoid 400s
+    msg.add_content(Content("text/plain", plain_text))
+    msg.add_content(Content("text/html", body_html))
+
     if REPLY_TO_EMAIL:
         msg.reply_to = Email(REPLY_TO_EMAIL)
 
