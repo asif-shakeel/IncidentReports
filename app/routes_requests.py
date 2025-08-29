@@ -153,6 +153,10 @@ def create_incident_request(
 
     # Persist IncidentRequest, including who created it + where to reply
     colnames = {c.name for c in models.IncidentRequest.__table__.columns}
+    logger.info("[requests] current_user username=%r email=%r",
+            getattr(current_user, "username", None),
+            getattr(current_user, "email", None))
+
     req_kwargs = {
         "incident_address": data.incident_address.strip(),
         "incident_datetime": data.incident_datetime.strip(),
