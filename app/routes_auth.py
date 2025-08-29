@@ -10,12 +10,9 @@ from jose import JWTError, jwt
 from app.database import get_db
 from app.models import User, IncidentRequest
 from app.schemas import RegisterRequest, IncidentRequestCreate
-from app.config import get_county_email_map
+from app.config import get_county_email, SECRET_KEY, ALGORITHM
 from app.email_io import send_request_email
 from auth import get_password_hash, verify_password, create_access_token
-
-SECRET_KEY  = os.getenv("SECRET_KEY", "dev-secret-change-me")
-ALGORITHM   = os.getenv("ALGORITHM", "HS256")
 
 logger = logging.getLogger("uvicorn.error").getChild("auth")
 router = APIRouter(tags=["auth"])
@@ -39,7 +36,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# dependency for other routes
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -59,9 +55,9 @@ def create_incident_request(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    county_email = get_county_email_map().get(req.county)
+    county_email = get_county_email(req.county)
     if not county_email:
-        raise HTTPException(status_code=400, detail="No email found for this county")
+        raise HTTPException(status_code=400, detail=f"No email found for county '{req.county}'")
 
     new_request = IncidentRequest(
         created_by=current_user.username,
@@ -75,14 +71,17 @@ def create_incident_request(
 
     subject = f"Fire Incident Report Request: {req.incident_datetime}"
     content = (
-        "Please provide the incident report for the following details:\\n"
-        f"Address: {req.incident_address}\\nDate/Time: {req.incident_datetime}\\nCounty: {req.county}"
+        "Please provide the incident report for the following details:\n"
+        f"Address: {req.incident_address}\nDate/Time: {req.incident_datetime}\nCounty: {req.county}"
     )
     try:
-        send_request_email(county_email, subject, content,
-                            incident_address=req.incident_address,
-                            incident_datetime=req.incident_datetime,
-                            county=req.county)
+        # append IRH_META inside send_request_email
+        send_request_email(
+            county_email, subject, content,
+            incident_address=req.incident_address,
+            incident_datetime=req.incident_datetime,
+            county=req.county
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
 
