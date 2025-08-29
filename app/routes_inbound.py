@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models
 from app.email_parser import parse_inbound_email
-from app.mailer import send_attachments_to_user, send_alert_no_attachments
+from app.email_io import send_attachments_to_user, send_alert_no_attachments
 from app.config import SECRET_KEY, ALGORITHM
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
         "forwarded": forwarded,
         "inbound_id": inbound_id,
     }
+
 # from fastapi import APIRouter, Request, Depends, UploadFile
 # from sqlalchemy.orm import Session
 # import logging
