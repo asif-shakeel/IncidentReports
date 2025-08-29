@@ -13,6 +13,7 @@ from typing import List, Tuple
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from fastapi import APIRouter, Request, Depends  # add Depends
 
 from app.database import get_db
 from app import models
@@ -133,30 +134,25 @@ def _match_incident_request(db: Session, addr: str, dt_str: str, county: str) ->
 
 
 def _resolve_recipient_email(db: Session, req: models.IncidentRequest) -> str | None:
-    # 1) If the request row stores requester email directly
-    if hasattr(req, "requester_email") and getattr(req, "requester_email"):
-        return getattr(req, "requester_email")
+    # 1) direct requester_email on the request
+    if hasattr(req, "requester_email") and req.requester_email:
+        return req.requester_email
 
-    # 2) If it stores the username who created it, look up their email
-    if hasattr(req, "created_by") and getattr(req, "created_by"):
-        try:
-            user = db.query(models.User).filter(models.User.username == req.created_by).first()
-            if user and getattr(user, "email", None):
-                return user.email
-        except Exception as e:
-            log.warning(f"[inbound] user lookup failed: {e}")
+    # 2) created_by → User.email
+    if hasattr(req, "created_by") and req.created_by:
+        user = db.query(models.User).filter(models.User.username == req.created_by).first()
+        if user and getattr(user, "email", None):
+            return user.email
 
-    # 3) Fallback: if the model includes a to_email and you want to echo back
-    if hasattr(req, "to_email") and getattr(req, "to_email", None):
-        return getattr(req, "to_email")
-
+    # No other fallbacks
     return None
+
 
 
 # ---------- routes ----------
 
 @router.post("/inbound")
-async def inbound(request: Request, db: Session = get_db()):
+async def inbound(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
     keys = list(form.keys())
     log.info("[inbound] received form keys: %s", keys)
