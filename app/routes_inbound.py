@@ -7,7 +7,7 @@ from app.database import get_db
 from app import models
 from app.email_parser import parse_inbound_email
 from app.email_io import send_attachments_to_user, send_alert_no_attachments
-from app.config import SECRET_KEY, ALGORITHM
+from auth import SECRET_KEY, ALGORITHM
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
