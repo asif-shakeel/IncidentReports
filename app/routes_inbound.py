@@ -14,6 +14,8 @@ try:
 except ImportError:
     from auth import SECRET_KEY, ALGORITHM
 
+logger = logging.getLogger("uvicorn.error").getChild("inbound")
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -33,11 +35,14 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     text = form.get("text") or ""
     html = form.get("html") or ""
 
-    # --- Attachment debug: list all multipart fields and detect files ---
+    # --- Attachment debug: list all multipart fields and detect files (robust) ---
     attachments = []
     nonfile_log = []
+
+    # 1) First pass: anything with a filename/read attrib is treated as a file
     for key, value in form.multi_items():
-        if isinstance(value, UploadFile) and (value.filename or "").strip():
+        is_file_like = hasattr(value, "filename") and hasattr(value, "read")
+        if is_file_like and (getattr(value, "filename", "") or "").strip():
             content = await value.read()
             attachments.append((value.filename, content))
             logger.info(f"[inbound] FILE part key={key!r} filename={value.filename!r} size={len(content)}")
@@ -45,12 +50,29 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
             val = str(value)
             nonfile_log.append((key, (val[:80] + "…") if len(val) > 80 else val))
 
+    # 2) Fallback: if SendGrid says there are N attachments but none captured,
+    #    fetch them explicitly by known keys: attachment1..attachmentN
+    try:
+        declared = int(str(form.get("attachments") or "0").strip() or "0")
+    except Exception:
+        declared = 0
+
+    if declared > 0 and not attachments:
+        logger.info(f"[inbound] fallback: declared attachments={declared}, collecting attachment1..{declared}")
+        for i in range(1, declared + 1):
+            part = form.get(f"attachment{i}")
+            if part and hasattr(part, "filename") and hasattr(part, "read"):
+                content = await part.read()
+                attachments.append((part.filename, content))
+                logger.info(f"[inbound] FILE part (fallback) key='attachment{i}' filename={part.filename!r} size={len(content)}")
+
     if nonfile_log:
         logger.info(f"[inbound] NONFILE parts: {nonfile_log}")
 
     attachment_count = len(attachments)
     has_attachments = attachment_count > 0
     logger.info(f"[inbound] attachment_count={attachment_count}")
+
 
     # --- Parse email body ---
     address, dt_str, county = parse_inbound_email(text, html)
