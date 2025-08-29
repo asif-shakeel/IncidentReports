@@ -3,7 +3,7 @@
 # ================================
 import sys, logging, os
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -39,3 +39,11 @@ def healthz():
 @app.get("/ping", tags=["ops"])
 def ping():
     return {"pong": True}
+
+@app.get("/", include_in_schema=False)
+def root():
+    # If you expose docs, you can redirect. Otherwise just return JSON.
+    try:
+        return RedirectResponse(url="/docs", status_code=302)
+    except Exception:
+        return JSONResponse({"ok": True, "service": "IncidentReportHub"}, headers={"Cache-Control": "no-store"})

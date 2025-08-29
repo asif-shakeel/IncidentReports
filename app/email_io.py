@@ -17,17 +17,44 @@ def _sg():
 def send_request_email(to_email: str, subject: str, content: str,
                        incident_address: str = "", incident_datetime: str = "", county: str = ""):
     """
-    Sends the initial county request and appends IRH_META so replies can be parsed reliably.
+    Sends the initial county request as multipart (plain text + HTML).
+    Keeps IRH_META (machine-friendly) while giving humans a clean HTML view.
     """
     meta = f"\n\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
-    body = (content or "").rstrip() + meta
+    body_text = (content or "").rstrip() + meta
+
+    # A simple, robust HTML body (no fancy CSS so it renders everywhere)
+    body_html = f"""\
+<!doctype html>
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;">
+    <p>Please provide the incident report for the following details:</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-top:8px;">
+      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Address:</td><td>{incident_address}</td></tr>
+      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">Date/Time:</td><td>{incident_datetime}</td></tr>
+      <tr><td style="padding:2px 8px 2px 0; font-weight:bold;">County:</td><td>{county}</td></tr>
+    </table>
+    <p style="margin-top:16px;">Thank you,</p>
+    <p>Incident Report Hub</p>
+
+    <!-- Keep the machine-friendly footer (hidden to most users but still present).
+         We also include it in the plain text part, so even if this is stripped, the text copy remains. -->
+    <div style="display:none; visibility:hidden; mso-hide:all;">
+      IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}
+    </div>
+  </body>
+</html>
+"""
 
     msg = Mail(
         from_email=Email(FROM_EMAIL),
         to_emails=[To(to_email)],
         subject=subject,
-        plain_text_content=Content("text/plain", body),
     )
+    # Add both parts explicitly
+    msg.add_content(Content("text/plain", body_text))
+    msg.add_content(Content("text/html", body_html))
+
     if REPLY_TO_EMAIL:
         msg.reply_to = Email(REPLY_TO_EMAIL)
 
