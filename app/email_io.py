@@ -29,13 +29,32 @@ def send_request_email(
         raise RuntimeError("SENDGRID_API_KEY is not set")
 
     sg = SendGridAPIClient(SENDGRID_API_KEY)
+    # Build a machine-readable footer that tends to survive quoting
+    meta_parts = []
+    if incident_address:
+        meta_parts.append(f"Address={incident_address}")
+    if incident_datetime:
+        meta_parts.append(f"DateTime={incident_datetime}")
+    if county:
+        meta_parts.append(f"County={county}")
+    meta_line = f"IRH_META: {' | '.join(meta_parts)}" if meta_parts else ""
+
+    # Append footer visibly at the end of the email body
+    body_with_meta = content.rstrip() + ("\n\n" + meta_line if meta_line else "")
 
     message = Mail(
         from_email=FROM_EMAIL,
         to_emails=to_email,
         subject=subject,
-        plain_text_content=content,
+        plain_text_content=body_with_meta,  # <— use the version with meta
     )
+
+    # message = Mail(
+    #     from_email=FROM_EMAIL,
+    #     to_emails=to_email,
+    #     subject=subject,
+    #     plain_text_content=content,
+    # )
     message.reply_to = Email(REPLY_TO_EMAIL)
 
     headers: dict[str, str] = {}

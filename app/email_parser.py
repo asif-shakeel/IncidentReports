@@ -12,11 +12,37 @@ import hashlib
 from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
+META_RE = re.compile(
+    r"IRH_META:\s*(?:Address=(?P<addr>[^|]+))?(?:\s*\|\s*DateTime=(?P<dt>[^|]+))?(?:\s*\|\s*County=(?P<county>.+))?",
+    re.IGNORECASE,
+)
+
+def _from_meta(raw_text: str):
+    m = META_RE.search(raw_text or "")
+    if not m:
+        return "", "", ""
+    addr = (m.group("addr") or "").strip()
+    dt   = (m.group("dt") or "").strip()
+    cty  = (m.group("county") or "").strip()
+    if addr or dt or cty:
+        logger.info("[parser] meta_hit from IRH_META")
+    return addr, dt, cty
+
+def _unquote_all(raw_text: str) -> str:
+    """Keep quoted block content by stripping leading > and not cutting at 'On ... wrote:'."""
+    raw = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in raw.split("\n"):
+        # drop common Gmail quote div markers when present in html->text
+        s = re.sub(r"^\s*>\s*", "", line).strip()
+        if s:
+            lines.append(s)
+    return "\n".join(lines)
 
 # ---------------- Runtime toggles ----------------
 USE_LLM = os.getenv("PARSER_USE_LLM", "0") == "1"  # default OFF
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LLM_MODEL = os.getenv("PARSER_LLM_MODEL", "gpt-4o-mini")
+LLM_MODEL = os.getenv("PARSER_LLM_MODEL", "gpt-5o-mini")
 LLM_MAX_CALLS_PER_MIN = int(os.getenv("LLM_MAX_CALLS_PER_MIN", "2"))
 
 _CALLS = []  # timestamps in last 60s
@@ -154,19 +180,47 @@ def llm_extract_fields_once(cleaned_text: str) -> Tuple[str, str, str]:
         return "", "", ""
 
 # ---------------- Public entry ----------------
-
 def parse_inbound_email(text: str, html: str, attachment_count: Optional[int] = None) -> Tuple[str, str, str]:
-    """Return (address, dt_str, county). Regex first; optional LLM if missing."""
+    # 0) Try META anywhere in raw (works even if reply body is short)
+    raw_full = (text or html_to_text(html) or "")
+    ma, md, mc = _from_meta(raw_full)
+    if ma or md or mc:
+        return ma or "", md or "", mc or ""
+
+    # 1) Regex on cleaned (current behavior)
     body_clean = clean_reply_body(text, html)
     address, dt_str, county = extract_fields_from_body(body_clean)
+    if address and dt_str and county:
+        return address, dt_str, county
 
-    if not (address and dt_str and county) and _may_call_llm(body_clean):
+    # 2) Regex on QUOTED block (don’t cut at “On … wrote:”)
+    unquoted = _unquote_all(raw_full)
+    qa, qd, qc = extract_fields_from_body(unquoted)
+    if qa and qd and qc:
+        logger.info("[parser] quoted_scan hit")
+        return qa, qd, qc
+
+    # 3) Optional LLM fallback
+    if _may_call_llm(body_clean):
         la, ld, lc = llm_extract_fields_once(body_clean)
         address = address or la
-        dt_str = dt_str or ld
-        county = county or lc
+        dt_str  = dt_str or ld
+        county  = county or lc
 
     return address or "", dt_str or "", county or ""
+
+# def parse_inbound_email(text: str, html: str, attachment_count: Optional[int] = None) -> Tuple[str, str, str]:
+#     """Return (address, dt_str, county). Regex first; optional LLM if missing."""
+#     body_clean = clean_reply_body(text, html)
+#     address, dt_str, county = extract_fields_from_body(body_clean)
+
+#     if not (address and dt_str and county) and _may_call_llm(body_clean):
+#         la, ld, lc = llm_extract_fields_once(body_clean)
+#         address = address or la
+#         dt_str = dt_str or ld
+#         county = county or lc
+
+#     return address or "", dt_str or "", county or ""
 
 
 # # app/email_parser.py — enhanced parser (regex-first, optional LLM)
