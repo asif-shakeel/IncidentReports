@@ -39,25 +39,35 @@ def send_request_email(
     incident_datetime: str = "",
     county: str = "",
 ):
+    """
+    Send county request as clean multipart (text + HTML).
+    Uses the three explicit fields as the single source of truth.
+    Keeps IRH_META (with colon) for reliable parsing of replies.
+    """
     if not SENDGRID_API_KEY:
         log.error("[email] SENDGRID_API_KEY missing; cannot send")
         return
 
+    # Plain text (one field per line, plus IRH_META)
     plain_text = (
         "Please provide the incident report for the following details:\n"
         f"Address: {incident_address}\n"
         f"Date/Time: {incident_datetime}\n"
         f"County: {county}\n"
+        f"\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
     )
 
+    # HTML (one field per line, plus hidden IRH_META copy)
     html_content = f"""
-    <p>Please provide the incident report for the following details:</p>
-    <p><strong>Address:</strong> {incident_address}</p>
-    <p><strong>Date/Time:</strong> {incident_datetime}</p>
-    <p><strong>County:</strong> {county}</p>
-    <hr>
-    <p style=\"font-size:10px;color:#888;\">IRH_META Address={incident_address} | DateTime={incident_datetime} | County={county}</p>
-    """
+<p>Please provide the incident report for the following details:</p>
+<p><strong>Address:</strong> {incident_address}</p>
+<p><strong>Date/Time:</strong> {incident_datetime}</p>
+<p><strong>County:</strong> {county}</p>
+<hr>
+<div style="display:none;visibility:hidden;mso-hide:all;">
+  IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}
+</div>
+"""
 
     message = Mail(
         from_email=Email(FROM_EMAIL),
@@ -66,14 +76,13 @@ def send_request_email(
         plain_text_content=Content("text/plain", plain_text),
         html_content=Content("text/html", html_content),
     )
-
     if REPLY_TO_EMAIL:
         message.reply_to = Email(REPLY_TO_EMAIL)
 
     try:
         sg = SendGridAPIClient(SENDGRID_API_KEY)
-        response = sg.send(message)
-        log.info("[email] sent request to %s, status=%s", to_email, response.status_code)
+        resp = sg.send(message)
+        log.info("[email] sent request to %s, status=%s", to_email, getattr(resp, "status_code", "?"))
     except Exception as e:
         log.exception("[email] failed to send request: %s", str(e))
 

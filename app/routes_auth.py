@@ -78,18 +78,15 @@ def create_incident_request(
     db.add(new_request); db.commit(); db.refresh(new_request)
 
     subject = f"Fire Incident Report Request: {req.incident_datetime}"
-    # We’ll still include a human-friendly plain text header in Content below
-    content = "Please provide the incident report for the following details:"
 
-    # Explicit keyword args so nothing goes blank
     send_request_email(
         to_email=county_email,
         subject=subject,
-        content=content,
         incident_address=req.incident_address,
         incident_datetime=req.incident_datetime,
         county=req.county,
-    )
+)
+
 
     log.info("[request] sent to %s for %s / %s / %s",
              county_email, req.incident_address, req.incident_datetime, req.county)
