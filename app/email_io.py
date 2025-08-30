@@ -4,13 +4,14 @@
 import os
 import base64
 import logging
+from typing import List, Dict
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Email, To, Content, Attachment
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "request@repo.incidentreportshub.com")
-REPLY_TO_EMAIL = os.getenv("REPLY_TO_EMAIL", "intake@repo.incidentreportshub.com")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL", "alert@repo.incidentreportshub.com")
+FROM_EMAIL       = os.getenv("FROM_EMAIL", "request@repo.incidentreportshub.com")
+REPLY_TO_EMAIL   = os.getenv("REPLY_TO_EMAIL", "intake@repo.incidentreportshub.com")
+ALERT_EMAIL      = os.getenv("ALERT_EMAIL", "alert@repo.incidentreportshub.com")
 
 log = logging.getLogger("uvicorn.error").getChild("email_io")
 
@@ -21,6 +22,17 @@ def _sg():
     return SendGridAPIClient(SENDGRID_API_KEY)
 
 
+def _log_resp(prefix: str, resp):
+    sg_msg_id = None
+    try:
+        # Some SDK versions expose headers as a dict-like; guard defensively
+        headers = getattr(resp, "headers", {}) or {}
+        sg_msg_id = headers.get("X-Message-Id") or headers.get("x-message-id")
+    except Exception:
+        pass
+    log.info("%s status=%s sg_msg_id=%s", prefix, getattr(resp, "status_code", "?"), sg_msg_id)
+
+
 def send_request_email(
     to_email: str,
     subject: str,
@@ -28,7 +40,9 @@ def send_request_email(
     incident_datetime: str,
     county: str,
 ):
-    """Send the county request. One field per line (text & HTML) + IRH_META (hidden unless DEBUG_META=1)."""
+    """Send the county request. One field per line (text & HTML) + IRH_META.
+    IRH_META is hidden unless DEBUG_META=1.
+    """
     plain_text = (
         "Please provide the incident report for the following details:\n"
         f"Address: {incident_address}\n"
@@ -62,7 +76,51 @@ def send_request_email(
         msg.reply_to = Email(REPLY_TO_EMAIL)
 
     resp = _sg().send(msg)
-    log.info("[email] sent request to %s status=%s", to_email, getattr(resp, "status_code", "?"))
+    _log_resp(f"[email] sent request to {to_email}", resp)
 
 
-# (unchanged) send_attachments_to_user + send_alert_no_attachments below...
+def send_attachments_to_user(to_email: str, subject: str, body: str, files: List[Dict]):
+    """Forward attachments to the requester.
+    files = [{"path": "/tmp/file.pdf", "filename": "file.pdf", "type": "application/pdf"}, ...]
+    """
+    msg = Mail(from_email=FROM_EMAIL, to_emails=to_email, subject=subject)
+    msg.add_content(Content("text/plain", body or "Attached are the files we received."))
+
+    if REPLY_TO_EMAIL:
+        msg.reply_to = Email(REPLY_TO_EMAIL)
+
+    for f in files:
+        with open(f["path"], "rb") as fh:
+            data = fh.read()
+        encoded = base64.b64encode(data).decode()
+        att = Attachment()
+        att.file_content = encoded
+        att.file_name = f.get("filename", "file")
+        att.file_type = f.get("type", "application/octet-stream")
+        att.disposition = "attachment"
+        msg.add_attachment(att)
+
+    resp = _sg().send(msg)
+    _log_resp(f"[email] forwarded {len(files)} attachment(s) to {to_email}", resp)
+
+
+def send_alert_no_attachments(to_email: str, subject: str, incident_address: str, incident_datetime: str, county: str):
+    msg = Mail(from_email=FROM_EMAIL, to_emails=to_email or ALERT_EMAIL, subject=subject)
+    plain = (
+        "A reply was received but contained no attachments.\n\n"
+        f"Address: {incident_address}\nDate/Time: {incident_datetime}\nCounty: {county}\n"
+    )
+    html = f"""<!doctype html>
+<html><body style=\"font-family:Arial,Helvetica,sans-serif; line-height:1.5; color:#222; font-size:14px;\">
+<p>A reply was received but contained <strong>no attachments</strong>.</p>
+<p><strong>Address:</strong> {incident_address}<br>
+<strong>Date/Time:</strong> {incident_datetime}<br>
+<strong>County:</strong> {county}</p>
+</body></html>"""
+    msg.add_content(Content("text/plain", plain))
+    msg.add_content(Content("text/html", html))
+    if REPLY_TO_EMAIL:
+        msg.reply_to = Email(REPLY_TO_EMAIL)
+
+    resp = _sg().send(msg)
+    _log_resp(f"[email] sent no-attachment alert to {to_email or ALERT_EMAIL}", resp)
