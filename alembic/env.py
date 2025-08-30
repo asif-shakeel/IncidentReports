@@ -1,58 +1,41 @@
-# alembic/env.py (top of file)
-import os, sys
+# alembic/env.py
+from __future__ import annotations
+import os
 from logging.config import fileConfig
+from sqlalchemy import engine_from_config, pool
 from alembic import context
 
-# Add project root to sys.path so 'app' is importable when running alembic anywhere
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
-
-from sqlalchemy import engine_from_config, pool
-
-
-import sys
-import os
-from dotenv import load_dotenv
-import os
-from pathlib import Path
-
-root_env = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=root_env, override=True) 
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# from main import Base
-from app.database import engine
-from app.models import Base
-
-# Alembic Config object
+# Interpret the config file for Python logging.
 config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
 
-# Setup logging
-fileConfig(config.config_file_name)
+# 1) DATABASE_URL from env (Render & local)
+database_url = os.getenv("DATABASE_URL") or os.getenv("DATABASE_URL_SYNC") or ""
 
-# Metadata for 'autogenerate'
+if database_url:
+    config.set_main_option("sqlalchemy.url", database_url)
+
+# 2) import your Base metadata
+from app.database import Base  # Base = declarative_base() used by your models
 target_metadata = Base.metadata
 
-def get_url():
-    return os.getenv("DATABASE_URL")
-
-def run_migrations_offline():
-    url = get_url()
+def run_migrations_offline() -> None:
+    url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
         context.run_migrations()
 
-def run_migrations_online():
+def run_migrations_online() -> None:
     connectable = engine_from_config(
-        {},
-        url=get_url(),
+        config.get_section(config.config_ini_section),  # reads sqlalchemy.url
+        prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:

@@ -16,6 +16,22 @@ for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
 
 app = FastAPI(title="IncidentReportHub Backend Phase 1 - Postgres")
 
+from starlette.middleware.cors import CORSMiddleware
+
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",                 # Vite dev
+    "http://127.0.0.1:5173",
+    "https://incidentreports-1.onrender.com" # your Render backend itself (ok to include)
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from app.routes_inbound import router as inbound_router
 from app.routes_requests import router as requests_router
 from app.routes_auth import router as auth_router
