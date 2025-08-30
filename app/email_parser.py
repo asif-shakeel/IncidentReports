@@ -1,105 +1,81 @@
 # ================================
 # FILE: app/email_parser.py
 # ================================
-import os, re, json, logging
+import os
+import re
+import json
+import logging
+
 logger = logging.getLogger("uvicorn.error").getChild("email_parser")
 
 USE_LLM = os.getenv("PARSER_USE_LLM", "0") == "1"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
-# Strict IRH_META (with colon after IRH_META)
-_re_meta = re.compile(
-    r"IRH_META:\s*Address=(.*?)\s*\|\s*DateTime=(.*?)\s*\|\s*County=(.*)",
-    re.I
-)
+# Prefer IRH_META first
+RE_META = re.compile(r"IRH_META:\s*Address=(.*?)\s*\|\s*DateTime=(.*?)\s*\|\s*County=(.*)", re.I)
+# Label patterns that stop at next label or end
+RE_ADDR = re.compile(r"Address\s*:\s*(.+?)(?=\s*(?:Date/Time\s*:|County\s*:|$))", re.I | re.S)
+RE_DT   = re.compile(r"(?:Date/Time|Datetime)\s*:\s*(.+?)(?=\s*(?:County\s*:|$))", re.I | re.S)
+RE_CNTY = re.compile(r"County\s*:\s*(.+?)\s*$", re.I | re.S)
 
-# Label patterns — stop each field at the next known label or end
-_re_addr = re.compile(r"Address\s*:\s*(.+?)(?=\s*(?:Date/Time\s*:|County\s*:|$))", re.I | re.S)
-_re_dt   = re.compile(r"(?:Date/Time|Datetime)\s*:\s*(.+?)(?=\s*(?:County\s*:|$))", re.I | re.S)
-_re_cnty = re.compile(r"County\s*:\s*(.+?)\s*$", re.I | re.S)
 
 def _strip_quotes(text: str) -> str:
-    lines = []
+    out = []
     for ln in (text or "").splitlines():
-        if ln.strip().startswith(">"):
+        if ln.lstrip().startswith(">"):
             continue
-        lines.append(ln)
-    return "\n".join(lines)
+        out.append(ln)
+    return "\n".join(out)
+
 
 def parse_inbound_email(text: str, html: str = ""):
-    # 1) IRH_META wins
+    # 1) Try IRH_META in either part
     for src in (text or "", html or ""):
-        m = _re_meta.search(src)
+        m = RE_META.search(src)
         if m:
             a, d, c = (s.strip() for s in m.groups())
             logger.info("[parser] meta_hit")
             return a, d, c
 
-    # 2) Try labels on raw text (handles single-line flattening)
+    # 2) Try labels on raw text (handles 1-line flattening)
     body = (text or "").strip()
-    a = _re_addr.search(body)
-    d = _re_dt.search(body)
-    c = _re_cnty.search(body)
+    a = RE_ADDR.search(body)
+    d = RE_DT.search(body)
+    c = RE_CNTY.search(body)
     if a and d and c:
         logger.info("[parser] regex_hit (raw)")
         return a.group(1).strip(), d.group(1).strip(), c.group(1).strip()
 
-    # 3) Dequoted (strip '>') if the client quoted our original
+    # 3) Dequote and try again
     cleaned = _strip_quotes(text or "")
-    a = _re_addr.search(cleaned)
-    d = _re_dt.search(cleaned)
-    c = _re_cnty.search(cleaned)
+    a = RE_ADDR.search(cleaned)
+    d = RE_DT.search(cleaned)
+    c = RE_CNTY.search(cleaned)
     if a and d and c:
         logger.info("[parser] regex_hit (dequoted)")
         return a.group(1).strip(), d.group(1).strip(), c.group(1).strip()
 
-    # 4) Optional LLM fallback (disabled by default)
-# --- LLM fallback (final resort) ---
+    # 4) Optional LLM fallback
     if USE_LLM and OPENAI_API_KEY:
-        import time, json
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        max_retries = int(os.getenv("LLM_MAX_RETRIES", "2"))
-        timeout_sec = int(os.getenv("LLM_TIMEOUT_SECS", "8"))
-        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-
-        prompt = (
-            "Extract three fields from the email reply body. "
-            "Return ONLY strict JSON with keys exactly: address, datetime, county. "
-            "Datetime should be in 'YYYY-MM-DD HH:MM' 24h format if present.\n\n"
-            f"EMAIL BODY:\n{text or ''}"
-        )
-
-        for attempt in range(max_retries + 1):
-            try:
-                # prefer meta-stripped body to reduce confusion
-                body_for_llm = (text or "")
-                # call
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    response_format={"type": "json_object"},
-                    timeout=timeout_sec,
-                )
-                content = resp.choices[0].message.content or "{}"
-                data = json.loads(content)
-                a = (data.get("address") or "").strip()
-                d = (data.get("datetime") or "").strip()
-                c = (data.get("county")  or "").strip()
-                logger.info("[parser] llm_hit model=%s", model)
-                return a, d, c
-            except Exception as e:
-                # 429 or transient => small backoff; anything else, bail
-                msg = str(e)
-                if "429" in msg and attempt < max_retries:
-                    delay = 0.5 * (2 ** attempt)
-                    logger.info("[parser] llm 429; retrying in %.2fs (attempt %d/%d)", delay, attempt+1, max_retries)
-                    time.sleep(delay)
-                    continue
-                logger.warning("[parser] llm_fallback_failed: %s", e)
-
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            prompt = (
+                "Extract Address, DateTime, County from this email body. "
+                "Return strict JSON with keys: address, datetime, county.\n\n" + (text or "")
+            )
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            out = resp.choices[0].message.content or "{}"
+            data = json.loads(out)
+            return (data.get("address", ""), data.get("datetime", ""), data.get("county", ""))
+        except Exception as e:
+            logger.warning(f"[parser] LLM fallback failed: {e}")
 
     logger.info("[parser] no hit; returning blanks")
     return "", "", ""

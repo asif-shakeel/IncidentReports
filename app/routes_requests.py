@@ -1,55 +1,74 @@
 # ================================
 # FILE: app/routes_requests.py
 # ================================
+import os
+import logging
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from jose import JWTError, jwt
+
 from app.database import get_db
-from app.models import IncidentRequest, User
+from app.models import User, IncidentRequest
 from app.schemas import IncidentRequestCreate
-from app.config import get_county_email_map
+from app.config import get_county_email
 from app.email_io import send_request_email
-from auth import decode_access_token
 
-router = APIRouter()
+log = logging.getLogger("uvicorn.error").getChild("routes_requests")
+router = APIRouter(tags=["requests"]) 
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+SECRET_KEY = os.getenv("SECRET_KEY", "changeme")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
-@router.post("/incident_request")
-def create_incident_request(
-    req: IncidentRequestCreate,
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
-    username = decode_access_token(token)
-    if not username:
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+    except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    return user
 
-    county_email = get_county_email_map().get(req.county)
+
+@router.post("/incident_request")
+def create_incident_request(
+    req: IncidentRequestCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    county_email = get_county_email(req.county)
     if not county_email:
-        raise HTTPException(status_code=400, detail="No email found for this county")
+        raise HTTPException(status_code=400, detail=f"No email found for county '{req.county}'")
 
-    new_request = IncidentRequest(
-        created_by=user.username,
-        requester_email=user.email,
+    new_req = IncidentRequest(
+        created_by=current_user.username,
+        requester_email=current_user.email,
         incident_address=req.incident_address,
         incident_datetime=req.incident_datetime,
         county=req.county,
         county_email=county_email,
     )
-    db.add(new_request)
-    db.commit()
-    db.refresh(new_request)
+    db.add(new_req); db.commit(); db.refresh(new_req)
 
     subject = f"Fire Incident Report Request: {req.incident_datetime}"
-    content = f"Please provide the incident report for the following details:\nAddress: {req.incident_address}\nDate/Time: {req.incident_datetime}\nCounty: {req.county}"
-
     try:
-        send_request_email(county_email, subject, content)
+        send_request_email(
+            to_email=county_email,
+            subject=subject,
+            incident_address=req.incident_address,
+            incident_datetime=req.incident_datetime,
+            county=req.county,
+        )
+        log.info("[request] sent to %s for %s / %s / %s", county_email, req.incident_address, req.incident_datetime, req.county)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+        log.warning("[request] send failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {e}")
 
-    return {"msg": "Incident request created and email sent", "request_id": new_request.id}
+    return {"msg": "Incident request created and email sent", "request_id": new_req.id}

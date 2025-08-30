@@ -1,8 +1,12 @@
-# =============================
+# ================================
 # FILE: app/routes_inbound.py
-# =============================
-import logging, re
-from typing import List, Tuple
+# ================================
+import os
+import uuid
+import logging
+from pathlib import Path
+from typing import List
+
 from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -10,149 +14,134 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models
 from app.email_parser import parse_inbound_email
+from app.utils import normalize, normalize_datetime
 from app.email_io import send_attachments_to_user, send_alert_no_attachments
 
-router = APIRouter(tags=["inbound"])
-log = logging.getLogger("uvicorn.error").getChild("inbound")
+log = logging.getLogger("uvicorn.error").getChild("routes_inbound")
+router = APIRouter(tags=["inbound"]) 
 
-# ---------- helpers ----------
-def _nonfile_items(form):
-    out = []
-    for k, v in form.multi_items():
-        if hasattr(v, "filename") and hasattr(v, "file"):
-            continue
-        out.append((k, str(v)))
-    return out
+TMP_DIR = Path(os.getenv("INBOUND_TMP", "/tmp/irh_inbound"))
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-def _collect_attachments(form) -> List[Tuple[str, bytes]]:
-    files: List[Tuple[str, bytes]] = []
-    # SendGrid provides "attachments" count and fields attachment1..N
-    try:
-        n = int(form.get("attachments") or 0)
-    except Exception:
-        n = 0
-    if n:
-        for i in range(1, n + 1):
-            key = f"attachment{i}"
-            uf = form.get(key)
-            if hasattr(uf, "file"):
-                files.append((uf.filename or f"file{i}", uf.file.read()))
-    else:
-        # Fallback: scan any UploadFile in form
-        for k, v in form.multi_items():
-            if hasattr(v, "file"):
-                files.append((v.filename or k, v.file.read()))
-    return files
 
-def _persist_inbound(db: Session, **kw) -> models.InboundEmail:
-    cols = {c.name for c in models.InboundEmail.__table__.columns}
-    safe = {k: v for k, v in kw.items() if k in cols}
-    row = models.InboundEmail(**safe)
-    db.add(row); db.commit(); db.refresh(row)
-    return row
-
-def _resolve_recipient_email(db: Session, req: models.IncidentRequest) -> str | None:
-    if getattr(req, "requester_email", None):
-        return req.requester_email
-    if getattr(req, "created_by", None):
-        user = db.query(models.User).filter(models.User.username == req.created_by).first()
-        if user and getattr(user, "email", None):
-            return user.email
-    return None
-
-# normalization for forgiving matches
-def _norm_text(s: str) -> str:
-    s = (s or "").lower().strip()
-    return " ".join(s.split())
-
-def _norm_addr(s: str) -> str:
-    s = (s or "").lower()
-    s = re.sub(r"[^a-z0-9 ]+", " ", s)     # strip punctuation
-    s = " ".join(s.split())
-    s = re.sub(r"\b(st|rd|ave|blvd|dr|ct|ln|hwy|pkwy|ter)\.$", r"\1", s)
-    return s.strip()
-
-# ---------- route ----------
 @router.post("/inbound")
 async def inbound(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
-    log.info("[inbound] received form keys: %s", list(form.keys()))
-    log.info("[inbound] NONFILE parts: %s", _nonfile_items(form))
 
-    sender  = form.get("from") or form.get("sender") or ""
-    subject = form.get("subject") or ""
-    text    = form.get("text") or ""
-    html    = form.get("html") or ""
+    keys = list(form.keys())
+    log.info("[inbound] received form keys: %s", keys)
 
-    files = _collect_attachments(form)
+    subject = form.get("subject", "")
+    sender  = form.get("from", "")
+    text    = form.get("text", "")
+    html    = form.get("html", "")
+
+    # attachments
+    try:
+        att_count = int(form.get("attachments", "0") or 0)
+    except Exception:
+        att_count = 0
+
+    files: List[dict] = []
+    if att_count:
+        for k in list(form.keys()):
+            if not str(k).startswith("attachment"):
+                continue
+            up = form.get(k)
+            try:
+                filename = getattr(up, "filename", f"file-{uuid.uuid4().hex}")
+                ctype    = getattr(up, "content_type", None)
+                dest = TMP_DIR / f"{uuid.uuid4().hex}-{filename}"
+                data = await up.read()
+                dest.write_bytes(data)
+                files.append({"path": str(dest), "filename": filename, "type": ctype or "application/octet-stream"})
+            except Exception as e:
+                log.warning("[inbound] failed to save attachment %s: %s", k, e)
+
     log.info("[inbound] attachment_count=%d", len(files))
 
-    # ✅ Call parser with 2 args (keeps compatibility with your current email_parser.py)
     address, dt_str, county = parse_inbound_email(text, html)
     log.info("[inbound] parsed addr=%r dt=%r county=%r", address, dt_str, county)
 
-    # persist inbound row
-    inbound_row = _persist_inbound(
-        db,
-        sender=sender,
-        subject=subject,
-        body=(text or html or "")[:10000],
-        parsed_address=address or None,
-        parsed_datetime=dt_str or None,
-        parsed_county=county or None,
-        has_attachments=bool(files),
-        attachment_count=len(files),
-    )
-
-    # try to match the request
-    forwarded = False
-    recipient = None
-    match_id  = None
+    # persist
     try:
-        log.info("[match] trying addr=%r dt=%r county=%r", address, dt_str, county)
-        addr_n = _norm_addr(address)
-        dt_n   = _norm_text(dt_str)
-        cnty_n = _norm_text(county)
-
-        # narrow by county first
-        candidates = db.query(models.IncidentRequest)\
-            .filter(models.IncidentRequest.county.ilike(f"%{county}%"))\
-            .order_by(models.IncidentRequest.id.desc())\
-            .all()
-
-        match = None
-        for r in candidates:
-            if _norm_addr(r.incident_address) == addr_n and _norm_text(r.incident_datetime) == dt_n:
-                match = r
-                break
-
-        if match:
-            match_id = match.id
-            recipient = _resolve_recipient_email(db, match)
-            log.info("[match] found id=%s recipient=%r", match_id, recipient)
-            subj = f"Incident Report Received: {getattr(match, 'incident_datetime', dt_str)}"
-            if recipient:
-                if files:
-                    send_attachments_to_user(recipient, subj, "Attached are the files received.", files)
-                else:
-                    send_alert_no_attachments(recipient, subj, "A reply was received but contained no attachments.")
-                forwarded = True
-                log.info("[forward] dispatched to %s (with_files=%s)", recipient, bool(files))
-            else:
-                log.warning("[forward] recipient not found for id=%s", match_id)
-        else:
-            log.info("[match] no request matched for normalized triple")
-
+        inbound_row = models.InboundEmail(
+            sender=sender,
+            subject=subject,
+            body=(text or html or "")[:10000],
+            parsed_address=address or None,
+            parsed_datetime=dt_str or None,
+            parsed_county=county or None,
+            has_attachments=bool(files),
+            attachment_count=len(files),
+        )
+        db.add(inbound_row); db.commit(); db.refresh(inbound_row)
+        inbound_id = inbound_row.id
     except Exception as e:
-        log.warning("[forward] failed: %s", e)
+        log.warning("[inbound] persist failed: %s", e)
+        inbound_id = None
+
+    # match + forward
+    match_info = None
+    try:
+        if address and dt_str and county:
+            n_addr = normalize(address)
+            n_dt   = normalize_datetime(dt_str)
+            n_cnty = normalize(county)
+
+            q = db.query(models.IncidentRequest).filter(models.IncidentRequest.county == county)
+            for row in q.all():
+                if (
+                    normalize(row.incident_address) == n_addr and
+                    normalize_datetime(row.incident_datetime) == n_dt and
+                    normalize(row.county) == n_cnty
+                ):
+                    match_info = row
+                    break
+
+            if match_info:
+                recipient = match_info.requester_email
+                if not recipient and match_info.created_by:
+                    u = db.query(models.User).filter(models.User.username == match_info.created_by).first()
+                    recipient = u.email if u else None
+
+                if recipient:
+                    if files:
+                        send_attachments_to_user(
+                            to_email=recipient,
+                            subject=f"Incident report reply — {address}",
+                            body="Attached is the response we received.",
+                            files=files,
+                        )
+                        log.info("[forward] dispatched to %s (with_files=True)", recipient)
+                    else:
+                        send_alert_no_attachments(
+                            to_email=recipient,
+                            subject=f"Incident report reply — {address}",
+                            incident_address=address,
+                            incident_datetime=dt_str,
+                            county=county,
+                        )
+                        log.info("[forward] alerted %s (no_files)", recipient)
+                else:
+                    log.warning("[forward] no recipient email available for matched id=%s", match_info.id)
+        else:
+            log.info("[match] not attempted; missing parsed fields")
+    except Exception as e:
+        log.warning("[match] lookup failed: %s", e)
+
+    # cleanup
+    for f in files:
+        try:
+            Path(f["path"]).unlink(missing_ok=True)
+        except Exception:
+            pass
 
     return JSONResponse({
         "status": "received",
         "sender": sender,
         "parsed": {"address": address, "datetime": dt_str, "county": county},
-        "match": match_id,
-        "attachments": [n for n, _ in files],
-        "forwarded": forwarded,
-        "inbound_id": getattr(inbound_row, "id", None),
-        "recipient": recipient,
+        "match": getattr(match_info, "id", None),
+        "attachments": [f.get("filename") for f in files],
+        "inbound_id": inbound_id,
     })
