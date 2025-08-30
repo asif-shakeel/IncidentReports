@@ -71,7 +71,8 @@ def send_attachments_to_user(to_email: str, subject: str, body: str, files: list
         msg.reply_to = Email(REPLY_TO_EMAIL)
 
     for f in files:
-        data = open(f["path"], "rb").read()
+        with open(f["path"], "rb") as fh:
+            data = fh.read()
         encoded = base64.b64encode(data).decode()
         att = Attachment()
         att.file_content = encoded

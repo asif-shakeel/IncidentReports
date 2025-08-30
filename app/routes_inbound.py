@@ -2,6 +2,7 @@
 # FILE: app/routes_inbound.py
 # ================================
 import os
+import re
 import uuid
 import logging
 from pathlib import Path
@@ -22,6 +23,7 @@ router = APIRouter(tags=["inbound"])
 
 TMP_DIR = Path(os.getenv("INBOUND_TMP", "/tmp/irh_inbound"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+ATT_FILE_KEY = re.compile(r"^attachment\d+$")
 
 
 @router.post("/inbound")
@@ -45,7 +47,7 @@ async def inbound(request: Request, db: Session = Depends(get_db)):
     files: List[dict] = []
     if att_count:
         for k in list(form.keys()):
-            if not str(k).startswith("attachment"):
+            if not ATT_FILE_KEY.match(str(k)):
                 continue
             up = form.get(k)
             try:
