@@ -34,15 +34,13 @@ def send_request_email(
     incident_datetime: str,
     county: str,
 ) -> str | None:
-    """Send the county request. One field per line (text & HTML) + IRH_META.
-    Returns SendGrid message id (if present).
-    """
+    """Send the county request. One field per line (text & HTML) + IRH_META."""
     plain_text = (
-        "Please provide the incident report for the following details:\n"
+        "Please provide the incident report for the following details:\n\n"
         f"Address: {incident_address}\n"
         f"Date/Time: {incident_datetime}\n"
-        f"County: {county}\n"
-        f"\nIRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
+        f"County: {county}\n\n"
+        f"IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}"
     )
 
     debug_meta = os.getenv("DEBUG_META", "0") == "1"
@@ -50,12 +48,12 @@ def send_request_email(
 
     html_content = f"""<!doctype html>
 <html>
-  <body style="font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;">
+  <body style=\"font-family:Arial,Helvetica,sans-serif; line-height:1.4; color:#222; font-size:14px;\">
     <p>Please provide the incident report for the following details:</p>
     <p><strong>Address:</strong> {incident_address}</p>
     <p><strong>Date/Time:</strong> {incident_datetime}</p>
     <p><strong>County:</strong> {county}</p>
-    <div style="{meta_html_style}">IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}</div>
+    <div style=\"{meta_html_style}\">IRH_META: Address={incident_address} | DateTime={incident_datetime} | County={county}</div>
   </body>
 </html>"""
 
@@ -108,7 +106,7 @@ def send_alert_no_attachments(to_email: str, subject: str,
         f"Address: {incident_address}\nDate/Time: {incident_datetime}\nCounty: {county}\n"
     )
     html = f"""<!doctype html>
-<html><body style="font-family:Arial,Helvetica,sans-serif; line-height:1.5; color:#222; font-size:14px;">
+<html><body style=\"font-family:Arial,Helvetica,sans-serif; line-height:1.5; color:#222; font-size:14px;\">
 <p>A reply was received but contained <strong>no attachments</strong>.</p>
 <p><strong>Address:</strong> {incident_address}<br>
 <strong>Date/Time:</strong> {incident_datetime}<br>

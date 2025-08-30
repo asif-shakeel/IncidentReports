@@ -10,20 +10,17 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import InboundEmail
 
-router = APIRouter(tags=["admin"])
+router = APIRouter(tags=["admin"])  # make sure main.py includes this router
 log = logging.getLogger("uvicorn.error").getChild("routes_admin")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-@router.get("/admin/forward_status")
+@router.get("/admin/forward-status")
 def forward_status(
     inbound_id: int | None = Query(default=None),
     sg_msg_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """
-    Returns stored forward tracking for an inbound row. If SendGrid Email Activity API
-    is available for your account, also attempts a live lookup.
-    """
+    """Return stored forward tracking and (if available) live status from SendGrid Email Activity API."""
     if not (inbound_id or sg_msg_id):
         raise HTTPException(status_code=400, detail="Provide inbound_id or sg_msg_id")
 
@@ -43,7 +40,7 @@ def forward_status(
         "sg_msg_id": sg_msg_id,
     }
 
-    # Optional live lookup via Email Activity API
+    # Optional live lookup via SendGrid Email Activity API
     activity = None
     if sg_msg_id and SENDGRID_API_KEY:
         try:
